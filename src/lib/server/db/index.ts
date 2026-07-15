@@ -1,21 +1,47 @@
-import { drizzle } from 'drizzle-orm/libsql';
-import { createClient } from '@libsql/client';
+import { drizzle, type LibSQLDatabase } from 'drizzle-orm/libsql';
+import { createClient, type Client } from '@libsql/client';
 import { hashPassword } from 'better-auth/crypto';
 import * as schema from './schema';
 import schemaSql from './schema.sql?raw';
 import { DATABASE_URL, DATABASE_AUTH_TOKEN } from '$app/env/private';
 
-if (!DATABASE_URL) throw new Error('DATABASE_URL is not set');
+// Lazily-created singletons. Nothing here touches the environment or opens a
+// connection at import time — the client and Drizzle instance are built on first
+// use. This keeps the module import-safe during SvelteKit's build (route
+// analysis), which imports it but never queries the DB and has no DATABASE_URL.
+let client: Client | undefined;
+let database: LibSQLDatabase<typeof schema> | undefined;
 
-// authToken is required for remote libSQL/Turso (Cloudflare) and ignored for
-// local/Vercel file databases. The client resolves to the web build
-// automatically on Cloudflare via @libsql/client's `workerd` export condition.
-const client = createClient({
-	url: DATABASE_URL,
-	authToken: DATABASE_AUTH_TOKEN || undefined
+function getClient(): Client {
+	if (!client) {
+		if (!DATABASE_URL) throw new Error('DATABASE_URL is not set');
+		// authToken is required for remote libSQL/Turso (Cloudflare) and ignored for
+		// local/Vercel file databases. The client resolves to the web build
+		// automatically on Cloudflare via @libsql/client's `workerd` export condition.
+		client = createClient({
+			url: DATABASE_URL,
+			authToken: DATABASE_AUTH_TOKEN || undefined
+		});
+	}
+	return client;
+}
+
+function getDb(): LibSQLDatabase<typeof schema> {
+	if (!database) database = drizzle(getClient(), { schema });
+	return database;
+}
+
+// Value-import façade so callers keep using `db.select(...)` etc. Property access
+// resolves the lazy singleton on first use; methods are bound to the real Drizzle
+// instance so their internal `this` is correct.
+export const db = new Proxy({} as LibSQLDatabase<typeof schema>, {
+	get(_target, prop) {
+		const instance = getDb();
+		const value = Reflect.get(instance, prop, instance);
+		return typeof value === 'function' ? value.bind(instance) : value;
+	},
+	has: (_target, prop) => prop in getDb()
 });
-
-export const db = drizzle(client, { schema });
 
 // Mock database bootstrap.
 //
@@ -35,6 +61,7 @@ export function ensureDb(): Promise<void> {
 }
 
 async function bootstrap(): Promise<void> {
+	const client = getClient();
 	await client.executeMultiple(schemaSql);
 
 	const existing = await client.execute({

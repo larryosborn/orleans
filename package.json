@@ -10,7 +10,7 @@
 		"dev": "vite dev",
 		"build": "vite build",
 		"preview": "vite preview",
-		"prepare": "svelte-kit sync || echo ''",
+		"prepare": "svelte-kit sync || echo '' && husky",
 		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
 		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
 		"lint": "prettier --check . && eslint .",
@@ -61,7 +61,9 @@
 		"eslint-plugin-storybook": "^10.5.0",
 		"eslint-plugin-svelte": "^3.19.0",
 		"globals": "^17.6.0",
+		"husky": "^9.1.7",
 		"layerchart": "2.0.0-next.48",
+		"lint-staged": "^17.0.8",
 		"mode-watcher": "^1.1.0",
 		"paneforge": "^1.0.2",
 		"playwright": "^1.60.0",
@@ -82,6 +84,11 @@
 		"vaul-svelte": "^1.0.0-next.7",
 		"vite": "^8.0.16",
 		"vitest": "^4.1.8",
-		"vitest-browser-svelte": "^2.1.1"
+		"vitest-browser-svelte": "^2.1.1",
+		"wrangler": "^4.111.0"
+	},
+	"lint-staged": {
+		"*.{js,ts,svelte,json,css,md,html}": "prettier --write --ignore-unknown",
+		"*.{js,ts,svelte}": "eslint --fix"
 	}
 }
