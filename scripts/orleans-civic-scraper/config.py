@@ -11,7 +11,7 @@ ALLOWED_HOSTS = {"www.town.orleans.ma.us", "town.orleans.ma.us"}
 # Identify yourself. Towns appreciate knowing who's crawling, and it keeps
 # you on the right side of polite. Update if you want a different contact.
 USER_AGENT = (
-    "OrleansCivicScraper/1.0 (resident civic project; contact: larry@cornsyrup.org)"
+    "OCS/1.0"
 )
 
 # ---------------------------------------------------------------------------
