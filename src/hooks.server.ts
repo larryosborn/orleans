@@ -1,6 +1,7 @@
 import { sequence } from '@sveltejs/kit/hooks';
 import { building } from '$app/env';
 import { auth } from '$lib/server/auth';
+import { ensureDb } from '$lib/server/db';
 import { svelteKitHandler } from 'better-auth/svelte-kit';
 import type { Handle } from '@sveltejs/kit';
 import { getTextDirection } from '$lib/paraglide/runtime';
@@ -19,6 +20,9 @@ const handleParaglide: Handle = ({ event, resolve }) =>
 	});
 
 const handleBetterAuth: Handle = async ({ event, resolve }) => {
+	// Bootstrap the mock DB (schema + seeded admin) before any auth query.
+	if (!building) await ensureDb();
+
 	const session = await auth.api.getSession({ headers: event.request.headers });
 
 	if (session) {
