@@ -5,12 +5,36 @@ import { sveltekitCookies } from 'better-auth/svelte-kit';
 import { getRequestEvent } from '$app/server';
 import { db } from '$lib/server/db';
 
-export const auth = betterAuth({
-	baseURL: ORIGIN,
-	secret: BETTER_AUTH_SECRET,
-	database: drizzleAdapter(db, { provider: 'sqlite' }),
-	emailAndPassword: { enabled: true },
-	plugins: [
-		sveltekitCookies(getRequestEvent) // make sure this is the last plugin in the array
-	]
+type Auth = ReturnType<typeof betterAuth>;
+
+// Lazily-constructed singleton. `betterAuth()` reads ORIGIN/BETTER_AUTH_SECRET and
+// wires up the DB adapter, so constructing it eagerly would run during SvelteKit's
+// build (route analysis), where those runtime values are absent. Deferring
+// construction to first use keeps the module import-safe.
+let instance: Auth | undefined;
+
+function getAuth(): Auth {
+	if (!instance) {
+		instance = betterAuth({
+			baseURL: ORIGIN,
+			secret: BETTER_AUTH_SECRET,
+			database: drizzleAdapter(db, { provider: 'sqlite' }),
+			emailAndPassword: { enabled: true },
+			plugins: [
+				sveltekitCookies(getRequestEvent) // make sure this is the last plugin in the array
+			]
+		});
+	}
+	return instance;
+}
+
+// Value-import façade so callers keep using `auth.api.signInEmail(...)` etc.
+// Property access constructs the singleton on first use, which only ever happens
+// while handling a request — never at import/build time.
+export const auth = new Proxy({} as Auth, {
+	get(_target, prop) {
+		const value = Reflect.get(getAuth(), prop, getAuth());
+		return typeof value === 'function' ? value.bind(getAuth()) : value;
+	},
+	has: (_target, prop) => prop in getAuth()
 });

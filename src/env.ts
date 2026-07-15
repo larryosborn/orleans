@@ -1,4 +1,5 @@
 import { defineEnvVars } from '@sveltejs/kit/hooks';
+import { building } from '$app/env';
 
 // Minimal Standard Schema marking a var as optional (value may be undefined).
 // Without a schema, defineEnvVars requires a non-empty string. The `types`
@@ -13,18 +14,47 @@ const optionalString = {
 	}
 };
 
+// Standard Schema for a var that is required when the app *runs* but must be
+// allowed to be absent at *build* time.
+//
+// SvelteKit executes the app during `build` (route analysis + prerendering) via
+// `set_env()`, which runs these validators against the build-time environment.
+// A plain `defineEnvVars` entry (no schema) requires a non-empty string, so the
+// build fails in CI/deploy where runtime secrets aren't present on disk. Since
+// SvelteKit sets `building` before calling `set_env()` during the build, we can
+// skip the presence check while building and enforce it only at runtime. The
+// inferred type stays `string`, matching the value seen by running code.
+const requiredAtRuntime = {
+	'~standard': {
+		version: 1 as const,
+		vendor: 'orleans',
+		validate: (value: unknown) => {
+			if (!value && !building) {
+				return { issues: [{ message: 'Value is missing.' }] };
+			}
+			return { value: value ? String(value) : (undefined as unknown as string) };
+		},
+		types: undefined as unknown as { input: string | undefined; output: string }
+	}
+};
+
 export const variables = defineEnvVars({
-	DATABASE_URL: { description: 'The database connection string.' },
+	DATABASE_URL: {
+		description: 'The database connection string.',
+		schema: requiredAtRuntime
+	},
 	DATABASE_AUTH_TOKEN: {
 		description:
 			'Auth token for a remote libSQL/Turso database. Required on Cloudflare (remote DB); unused for local/Vercel file databases.',
 		schema: optionalString
 	},
 	ORIGIN: {
-		description: 'The app origin (base URL), e.g. `http://localhost:5173`.'
+		description: 'The app origin (base URL), e.g. `http://localhost:5173`.',
+		schema: requiredAtRuntime
 	},
 	BETTER_AUTH_SECRET: {
 		description:
-			'Secret used to sign tokens. For production use 32 characters generated with high entropy. See [Better Auth installation](https://www.better-auth.com/docs/installation).'
+			'Secret used to sign tokens. For production use 32 characters generated with high entropy. See [Better Auth installation](https://www.better-auth.com/docs/installation).',
+		schema: requiredAtRuntime
 	}
 });
