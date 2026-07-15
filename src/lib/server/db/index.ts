@@ -3,11 +3,17 @@ import { createClient } from '@libsql/client';
 import { hashPassword } from 'better-auth/crypto';
 import * as schema from './schema';
 import schemaSql from './schema.sql?raw';
-import { DATABASE_URL } from '$app/env/private';
+import { DATABASE_URL, DATABASE_AUTH_TOKEN } from '$app/env/private';
 
 if (!DATABASE_URL) throw new Error('DATABASE_URL is not set');
 
-const client = createClient({ url: DATABASE_URL });
+// authToken is required for remote libSQL/Turso (Cloudflare) and ignored for
+// local/Vercel file databases. The client resolves to the web build
+// automatically on Cloudflare via @libsql/client's `workerd` export condition.
+const client = createClient({
+	url: DATABASE_URL,
+	authToken: DATABASE_AUTH_TOKEN || undefined
+});
 
 export const db = drizzle(client, { schema });
 
