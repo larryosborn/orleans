@@ -105,4 +105,3 @@ A good answer cites numbered sources with town URLs.
 - [ ] Corpus spot-checked: 5+ random files are clean readable text with correct frontmatter URLs
 - [ ] Index built; 3 test queries return relevant chunks
 - [ ] Hand back the whole `data/` directory (zip or drive) + any notes on failures/oddities
-
