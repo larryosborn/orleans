@@ -1,0 +1,17 @@
+# crawl
+requests>=2.31
+beautifulsoup4>=4.12
+
+# extract
+trafilatura>=1.8
+PyMuPDF>=1.24
+
+# index
+numpy>=1.26
+sentence-transformers>=3.0
+
+# chat
+anthropic>=0.34
+
+# optional, for scanned PDFs:
+# ocrmypdf  (also needs tesseract: brew install tesseract / apt install tesseract-ocr)
