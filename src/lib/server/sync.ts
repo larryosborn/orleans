@@ -238,75 +238,89 @@ export async function listResources(opts: {
 	return { rows, total };
 }
 
-export type ActivityOutcome = 'new' | 'changed' | 'gone' | 'checked';
-
-export interface ActivityItem {
+export interface ProcessingRecord {
 	id: string;
 	url: string;
 	title: string | null;
-	kind: string;
-	sizeBytes: number | null;
-	fetchedAt: number | null;
-	outcome: ActivityOutcome;
+	// type
+	kind: string; // page | document | sitemap | other
+	contentType: string | null;
+	// current status: resource lifecycle + latest change outcome
+	state: string; // active | gone | error
+	httpStatus: number | null;
+	currentOutcome: string | null; // latest resource_version.changeKind
+	currentAt: number | null; // latest resource_version.observedAt
+	// previous status: the outcome recorded *before* the latest version
+	previousOutcome: string | null; // 2nd-newest resource_version.changeKind
+	// cache age
+	fetchedAt: number | null; // resource.lastFetchedAt
 }
 
-// Whether the newest version row was produced by *this* fetch (its observation
-// lands within a few seconds of lastFetchedAt) vs. an older change.
-const VERSION_MATCH_MS = 5000;
+export interface ProcessingPanel {
+	records: ProcessingRecord[];
+	/** True when more fetched resources exist than the panel shows (truncated). */
+	hasMore: boolean;
+}
 
-/** Live activity: the most-recently *fetched* resources, newest first. Unlike the
- *  change feed, this includes unchanged re-verifies (every fetch bumps
- *  `lastFetchedAt`), so it keeps moving even when nothing is changing — that's the
- *  point: it shows the worker is doing work. Each row's outcome comes from its
- *  latest version row (new/changed/gone) when that version was written by this same
- *  fetch; otherwise the fetch confirmed no change → 'checked'. */
-export async function getRecentActivity(limit = 12): Promise<ActivityItem[]> {
-	const lastKind = sql<string | null>`(
-		select ${resourceVersion.changeKind} from ${resourceVersion}
-		where ${resourceVersion.resourceId} = ${resource.id}
-		order by ${resourceVersion.observedAt} desc limit 1
-	)`;
-	const lastVersionAt = sql<number | null>`(
-		select ${resourceVersion.observedAt} from ${resourceVersion}
-		where ${resourceVersion.resourceId} = ${resource.id}
-		order by ${resourceVersion.observedAt} desc limit 1
-	)`;
-	const rows = await db
+/** "Currently processing": the most-recently *fetched* resources, newest first —
+ *  a compact window on what the worker just touched. Unlike the change feed it
+ *  includes unchanged re-verifies (every fetch bumps `lastFetchedAt`), so it keeps
+ *  moving even when nothing changes. Each record is enriched from its resource row
+ *  (type, current state/status) and the append-only version log: the latest
+ *  version's outcome (current) and the one before it (previous). Fetches `limit + 1`
+ *  rows so the caller can flag truncation without a second count query. */
+export async function getProcessingRecords(limit = 3): Promise<ProcessingPanel> {
+	// Fetch one extra row so the caller can flag truncation without a count query.
+	const resources = await db
 		.select({
 			id: resource.id,
 			url: resource.url,
 			title: resource.title,
 			kind: resource.kind,
+			contentType: resource.contentType,
 			state: resource.state,
-			sizeBytes: resource.sizeBytes,
-			lastFetchedAt: resource.lastFetchedAt,
-			lastKind,
-			lastVersionAt
+			httpStatus: resource.httpStatus,
+			lastFetchedAt: resource.lastFetchedAt
 		})
 		.from(resource)
 		.where(isNotNull(resource.lastFetchedAt))
 		.orderBy(desc(resource.lastFetchedAt))
-		.limit(limit);
+		.limit(limit + 1);
 
-	return rows.map((r) => {
-		const fetchedAt = r.lastFetchedAt?.getTime() ?? null;
-		const versionAt = r.lastVersionAt != null ? Number(r.lastVersionAt) : null;
-		const fromThisFetch =
-			fetchedAt != null && versionAt != null && Math.abs(fetchedAt - versionAt) < VERSION_MATCH_MS;
-		let outcome: ActivityOutcome = 'checked';
-		if (r.state === 'gone') outcome = 'gone';
-		else if (fromThisFetch && (r.lastKind === 'new' || r.lastKind === 'changed'))
-			outcome = r.lastKind;
-		return {
-			id: r.id,
-			url: r.url,
-			title: r.title,
-			kind: r.kind,
-			sizeBytes: r.sizeBytes,
-			fetchedAt,
-			outcome
-		};
-	});
+	const hasMore = resources.length > limit;
+
+	// Enrich each shown resource with its two newest version rows — [current,
+	// previous] — via a small indexed lookup (rv_resource_idx). A per-resource
+	// query keeps the correlation correct and bounded to the handful of rows the
+	// panel shows, rather than a correlated subquery in the list select.
+	const records: ProcessingRecord[] = await Promise.all(
+		resources.slice(0, limit).map(async (r) => {
+			const versions = await db
+				.select({
+					changeKind: resourceVersion.changeKind,
+					observedAt: resourceVersion.observedAt
+				})
+				.from(resourceVersion)
+				.where(eq(resourceVersion.resourceId, r.id))
+				.orderBy(desc(resourceVersion.observedAt))
+				.limit(2);
+			const [current, previous] = versions;
+			return {
+				id: r.id,
+				url: r.url,
+				title: r.title,
+				kind: r.kind,
+				contentType: r.contentType,
+				state: r.state,
+				httpStatus: r.httpStatus,
+				currentOutcome: current?.changeKind ?? null,
+				currentAt: current?.observedAt?.getTime() ?? null,
+				previousOutcome: previous?.changeKind ?? null,
+				fetchedAt: r.lastFetchedAt?.getTime() ?? null
+			};
+		})
+	);
+	return { records, hasMore };
 }
 
 /** Change feed: recent version rows joined to their resource. */

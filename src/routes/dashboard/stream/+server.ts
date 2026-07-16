@@ -63,12 +63,12 @@ export const GET: RequestHandler = async ({ locals, request }) => {
 			// Reconnection delay hint for EventSource.
 			controller.enqueue(encoder.encode('retry: 3000\n\n'));
 
-			// Aggregate progress + the activity feed are heavier than the run row, so
-			// refresh them less often. `activity` is only included in the payload on
-			// the ticks it's refreshed; the client keeps its last copy otherwise.
+			// Aggregate progress + the "currently processing" panel are heavier than the
+			// run row, so refresh them less often. `processing` is only included in the
+			// payload on the ticks it's refreshed; the client keeps its last copy otherwise.
 			let lastAgg = 0;
 			let agg: sync.SyncProgress | null = null;
-			let activity: sync.ActivityItem[] = [];
+			let processing: sync.ProcessingPanel | null = null;
 			const tick = async () => {
 				try {
 					const active = await sync.getActiveRun();
@@ -76,12 +76,15 @@ export const GET: RequestHandler = async ({ locals, request }) => {
 					if (Date.now() - lastAgg >= AGG_MS) {
 						lastAgg = Date.now();
 						fresh = true;
-						[agg, activity] = await Promise.all([sync.getSyncProgress(), sync.getRecentActivity()]);
+						[agg, processing] = await Promise.all([
+							sync.getSyncProgress(),
+							sync.getProcessingRecords()
+						]);
 					}
 					send('progress', {
 						run: active ? serialize(active) : null,
 						progress: agg,
-						activity: fresh ? activity : undefined
+						processing: fresh ? processing : undefined
 					});
 				} catch {
 					// transient DB error — next tick retries
