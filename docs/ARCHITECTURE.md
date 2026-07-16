@@ -62,14 +62,14 @@ Key decisions (and why):
 Six tables (defined in [`src/lib/server/db/crawl.schema.ts`](../src/lib/server/db/crawl.schema.ts)),
 alongside the existing `user`/`session`/`account`/`verification`/`task` tables.
 
-| Table              | One row per                  | Purpose                                                                                                                                                                     |
-| ------------------ | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `resource`         | unique normalized URL        | The manifest. Latest fingerprint (sha256/etag/size/status), `kind` (page/document/sitemap), `state` (active/gone/error), lifecycle timestamps. Stable identity across runs. |
-| `resource_version` | observed change              | Append-only history. A row is written only on a real change: `new`, `changed`, `probed` (estimate), `gone`, `error`. This is the "what changed, when" log.                  |
-| `blob`             | unique file content (sha256) | Content-addressed store record: size, content-type, `storage_key`, ref-count. Many versions can point to one blob (dedup).                                                  |
-| `link`             | discovered edge              | The link graph: `from_resource` → `to_url`/`to_resource`, so you can find orphan documents, hub pages, etc.                                                                 |
-| `sync_run`         | a run                        | Mode, status, `control` flag, heartbeat, `current_url`, and rollup counters (pages/docs/new/changed/errors/bytes). Also the control plane.                                  |
-| `crawl_event`      | a per-URL event              | Errors and notable events (`http_error`, `fetch_error`, `throttled`, `robots_blocked`, …) for the dashboard's errors panel.                                                 |
+| Table              | One row per                  | Purpose                                                                                                                                                                                              |
+| ------------------ | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `resource`         | unique normalized URL        | The manifest. Latest fingerprint (sha256/etag/size/status), `kind` (page/document/sitemap), `state` (active/gone/error), lifecycle timestamps. Stable identity across runs.                          |
+| `resource_version` | observed change              | Append-only history. A row is written only on a real change: `new`, `changed`, `probed` (estimate), `gone`, `error`. This is the "what changed, when" log.                                           |
+| `blob`             | unique file content (sha256) | Content-addressed store record: size, content-type, `storage_key`, ref-count, and `r2_synced_at` (null until confirmed in R2 — the publish marker, §5). Many versions can point to one blob (dedup). |
+| `link`             | discovered edge              | The link graph: `from_resource` → `to_url`/`to_resource`, so you can find orphan documents, hub pages, etc.                                                                                          |
+| `sync_run`         | a run                        | Mode, status, `control` flag, heartbeat, `current_url`, and rollup counters (pages/docs/new/changed/errors/bytes). Also the control plane.                                                           |
+| `crawl_event`      | a per-URL event              | Errors and notable events (`http_error`, `fetch_error`, `throttled`, `robots_blocked`, …) for the dashboard's errors panel.                                                                          |
 
 Change detection: on fetch, the worker compares the new sha256 (crawl) or
 size/etag (estimate) to the resource's stored fingerprint → decides
@@ -106,28 +106,47 @@ This is the cheapest way to archive the text/HTML while deferring multi-MB PDFs.
 
 ---
 
-## 5. Blob storage & sync
+## 5. Blob storage: R2 canonical + opt-in publishing
 
-Bodies are content-addressed: `blobs/<ab>/<cd>/<sha256><ext>`. Two interchangeable
-backends selected by `BLOB_STORE` (`auto` | `local` | `r2`; default `auto` = R2 if
-its env is set, else the local cache):
+Bodies are content-addressed: `blobs/<ab>/<cd>/<sha256><ext>`. There are two
+backends, but they are **not** interchangeable targets picked by a switch —
+they're layered:
 
-- **local** — a filesystem dir (`.cache/blobs`, or `BLOB_DIR`). Free; ideal for
-  dev/testing. Stores real bytes.
-- **r2** — Cloudflare R2 (S3-compatible), for durable remote storage.
+- **local** — a filesystem dir (`.cache/blobs`, or `BLOB_DIR`). The dev/staging
+  store. Every crawl writes new bytes here first.
+- **r2** — Cloudflare R2 (S3-compatible), the **canonical durable archive**.
 
-Because keys are immutable, moving objects between backends is a plain
-copy-what's-missing (no conflicts). The `blob` table is the manifest:
+**Publishing to R2 is opt-in.** The crawler always writes new blobs to the local
+backend; it only writes **through** to R2 when the worker runs with `--publish`
+(prod runs pass it). A default (unpublished) run therefore never touches R2, so a
+dev/experimental crawl can't pollute the canonical archive. This is a write-path
+policy, not a read cache — nothing in the app reads blob bytes on the hot path, so
+there is no prod read-through cache.
+
+`blob.r2_synced_at` (nullable timestamp) is the publish marker: **null until the
+object is confirmed present in R2**, then stamped. It's set on a successful
+`--publish` write-through and on a `blobs:push` promotion. Because it doubles as
+the "held / pending publish" queue, `r2_synced_at IS NULL` is exactly the set of
+blobs that exist only locally. The read model `getUnpublishedBlobCount()`
+(`src/lib/server/sync.ts`) exposes that backlog.
+
+Because keys are immutable, promoting/reconciling is a plain copy-what's-missing
+(no conflicts, ever). The `blob` table is the manifest:
 
 ```bash
-bun run blobs:push    # local  → R2
-bun run blobs:pull    # R2     → local
+bun run blobs:push    # promote held (r2_synced_at IS NULL) blobs → R2, then stamp them
+bun run blobs:pull    # R2 → local (download objects the cache lacks)
 bun run blobs:sync    # both directions
 bun run worker/sync-blobs.ts --both --dry-run
 ```
 
-Cost-saving workflow: crawl locally (`BLOB_STORE=local`, no R2 usage), then
-`bun run blobs:push` when you want it durable.
+`blobs:push` is marker-aware: it only considers held blobs, uploads what R2 lacks,
+and stamps `r2_synced_at` — so a second push right after copies nothing. There is
+no automatic/scheduled sync (that's a separate concern).
+
+Cost-saving workflow: crawl locally (default, no `--publish` → no R2 usage), then
+`bun run blobs:push` when you want it durable — or run the prod worker with
+`--publish` to write through as it goes.
 
 **Viewing an archived copy.** The dashboard's content explorer links each stored
 resource to `/dashboard/blob/[id]` (auth-gated). In prod it presigns a short-lived
@@ -178,8 +197,8 @@ Control is just DB writes: enqueue = insert `sync_run(status=queued)`; pause/can
 bun install
 bun run dev                      # web app + dashboard (http://localhost:5173/dashboard)
 
-# in another shell — crawl into the local cache, no R2 needed:
-DATABASE_URL="file:local.db" BLOB_STORE=local \
+# in another shell — crawl into the local cache (default: no --publish, no R2 needed):
+DATABASE_URL="file:local.db" \
   bun run worker/index.ts --mode estimate --max 100 --once
 ```
 
@@ -191,8 +210,10 @@ Default seeded login (local/mock DB): `admin@example.com` / `password`.
    `DATABASE_AUTH_TOKEN` + `ORIGIN` + `BETTER_AUTH_SECRET`, and the `R2_*` vars so
    the dashboard can presign archived copies (§5). Tables auto-create on first request.
 2. Blob store → create an R2 bucket + token, set `R2_*` (see below).
-3. Worker → run `bun run worker` on an always-on host with the same
-   `DATABASE_URL`/`DATABASE_AUTH_TOKEN` + `R2_*`. Drive it from `/dashboard`.
+3. Worker → run `bun run worker --publish` on an always-on host with the same
+   `DATABASE_URL`/`DATABASE_AUTH_TOKEN` + `R2_*`. `--publish` writes blobs through
+   to R2 (the canonical archive); without it the worker holds blobs local-only.
+   Drive it from `/dashboard`.
 
 ---
 
@@ -200,22 +221,22 @@ Default seeded login (local/mock DB): `admin@example.com` / `password`.
 
 Full list in [`.env.example`](../.env.example).
 
-| Var                                                                       | Used by      | Notes                                                                                                             |
-| ------------------------------------------------------------------------- | ------------ | ----------------------------------------------------------------------------------------------------------------- |
-| `DATABASE_URL`                                                            | app + worker | Turso `libsql://…` (or `file:` locally)                                                                           |
-| `DATABASE_AUTH_TOKEN`                                                     | app + worker | Required for remote Turso                                                                                         |
-| `ORIGIN`, `BETTER_AUTH_SECRET`                                            | app          | Auth                                                                                                              |
-| `BLOB_STORE`                                                              | worker       | `auto` \| `local` \| `r2` (default `auto`)                                                                        |
-| `BLOB_DIR`                                                                | worker       | Local cache dir (default `.cache/blobs`)                                                                          |
-| `R2_ENDPOINT` / `R2_BUCKET` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | worker + app | Cloudflare R2 (S3 API). Worker for crawl/recrawl + `blobs:*`; the app presigns them to view archived copies (§5). |
-| `CRAWLER_USER_AGENT`                                                      | worker       | How the crawler identifies itself (see §13).                                                                      |
-| `CRAWLER_RATE_LIMIT` / `CRAWLER_RATE_LIMIT_JITTER`                        | worker       | Base seconds between requests + random extra 0..N (non-periodic).                                                 |
-| `CRAWLER_MAX_PAGES`                                                       | worker       | Hard safety cap per run.                                                                                          |
-| `CRAWLER_MAX_DOC_BYTES`                                                   | worker       | Skip downloading docs over N bytes (0 = pages-only). See §4.                                                      |
-| `CRAWLER_SEEDS`                                                           | worker       | Comma-separated paths/URLs to override the default seeds.                                                         |
-| `CRAWLER_TTL_{CORE,PAGE,AGENDA,DOC}_DAYS`                                 | worker       | `sync` per-tier freshness TTLs (default 7/7/30/180). See §11.                                                     |
-| `CRAWLER_SYNC_BATCH` / `CRAWLER_ERROR_BACKOFF_HOURS`                      | worker       | `sync` claim batch size / failed-URL re-schedule delay.                                                           |
-| `SYNC_SCHEDULE_MINUTES` / `WORKER_STALE_MINUTES`                          | worker       | Auto-enqueue `sync` this often (0=off); reap crashed runs. §11.                                                   |
+| Var                                                                       | Used by      | Notes                                                                                                                |
+| ------------------------------------------------------------------------- | ------------ | -------------------------------------------------------------------------------------------------------------------- |
+| `DATABASE_URL`                                                            | app + worker | Turso `libsql://…` (or `file:` locally)                                                                              |
+| `DATABASE_AUTH_TOKEN`                                                     | app + worker | Required for remote Turso                                                                                            |
+| `ORIGIN`, `BETTER_AUTH_SECRET`                                            | app          | Auth                                                                                                                 |
+| `--publish` (CLI flag, not env)                                           | worker       | Write blobs through to R2 (canonical archive) + stamp `r2_synced_at`. Default off = local-only (§5). Prod passes it. |
+| `BLOB_DIR`                                                                | worker       | Local cache dir (default `.cache/blobs`)                                                                             |
+| `R2_ENDPOINT` / `R2_BUCKET` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | worker + app | Cloudflare R2 (S3 API). Worker for crawl/recrawl + `blobs:*`; the app presigns them to view archived copies (§5).    |
+| `CRAWLER_USER_AGENT`                                                      | worker       | How the crawler identifies itself (see §13).                                                                         |
+| `CRAWLER_RATE_LIMIT` / `CRAWLER_RATE_LIMIT_JITTER`                        | worker       | Base seconds between requests + random extra 0..N (non-periodic).                                                    |
+| `CRAWLER_MAX_PAGES`                                                       | worker       | Hard safety cap per run.                                                                                             |
+| `CRAWLER_MAX_DOC_BYTES`                                                   | worker       | Skip downloading docs over N bytes (0 = pages-only). See §4.                                                         |
+| `CRAWLER_SEEDS`                                                           | worker       | Comma-separated paths/URLs to override the default seeds.                                                            |
+| `CRAWLER_TTL_{CORE,PAGE,AGENDA,DOC}_DAYS`                                 | worker       | `sync` per-tier freshness TTLs (default 7/7/30/180). See §11.                                                        |
+| `CRAWLER_SYNC_BATCH` / `CRAWLER_ERROR_BACKOFF_HOURS`                      | worker       | `sync` claim batch size / failed-URL re-schedule delay.                                                              |
+| `SYNC_SCHEDULE_MINUTES` / `WORKER_STALE_MINUTES`                          | worker       | Auto-enqueue `sync` this often (0=off); reap crashed runs. §11.                                                      |
 
 ---
 

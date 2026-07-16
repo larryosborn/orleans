@@ -3,8 +3,13 @@
 // a one-shot CLI mode for ops/testing:
 //
 //   bun run worker/index.ts                       # long-running poll loop
+//   bun run worker/index.ts --publish             # ...writing blobs through to R2
 //   bun run worker/index.ts --mode estimate --max 80 --once
 //   bun run worker/index.ts --mode crawl          # enqueue + run once, then exit
+//
+// Publishing is opt-in: without --publish the worker holds blobs in the LOCAL
+// backend only (r2_synced_at null); with --publish it writes through to R2 (the
+// canonical archive) and stamps r2_synced_at. Prod runs pass --publish.
 import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { and, asc, desc, eq, gt, inArray, lt } from 'drizzle-orm';
@@ -81,11 +86,11 @@ async function claimNext(): Promise<SyncRun | null> {
 	return claimed[0] ?? null; // null => another worker grabbed it first
 }
 
-async function runOne(run: SyncRun): Promise<void> {
+async function runOne(run: SyncRun, publish: boolean): Promise<void> {
 	console.log(`▶ run ${run.id} mode=${run.mode} max=${run.maxPages ?? 'default'}`);
 	try {
-		if (run.mode === 'sync') await executeSync(run);
-		else await executeRun(run);
+		if (run.mode === 'sync') await executeSync(run, { publish });
+		else await executeRun(run, { publish });
 		const [done] = await db.select().from(syncRun).where(eq(syncRun.id, run.id));
 		console.log(
 			`✓ run ${run.id} ${done?.status}: ${done?.pages} pages, ${done?.documents} docs, ` +
@@ -138,9 +143,10 @@ async function maybeScheduleSync(): Promise<void> {
 	console.log('scheduled sync enqueued');
 }
 
-async function pollLoop(): Promise<void> {
+async function pollLoop(publish: boolean): Promise<void> {
 	const sched = SYNC_SCHEDULE_MS > 0 ? `; auto-sync every ${SYNC_SCHEDULE_MS / 60_000}m` : '';
-	console.log(`sync worker ${WORKER_ID} polling (every ${POLL_INTERVAL_MS}ms${sched})`);
+	const pub = publish ? '; publishing to R2' : '; local-only (unpublished)';
+	console.log(`sync worker ${WORKER_ID} polling (every ${POLL_INTERVAL_MS}ms${sched}${pub})`);
 	let lastMaintenance = 0;
 	while (!stopping) {
 		if (Date.now() - lastMaintenance > MAINTENANCE_INTERVAL_MS) {
@@ -149,27 +155,36 @@ async function pollLoop(): Promise<void> {
 			await maybeScheduleSync();
 		}
 		const run = await claimNext();
-		if (run) await runOne(run);
+		if (run) await runOne(run, publish);
 		else await Bun.sleep(POLL_INTERVAL_MS);
 	}
 	console.log('stopped.');
 }
 
-async function enqueueAndRunOnce(mode: string, maxPages?: number): Promise<void> {
+async function enqueueAndRunOnce(mode: string, publish: boolean, maxPages?: number): Promise<void> {
 	const [run] = await db
 		.insert(syncRun)
 		.values({ mode, maxPages: maxPages ?? null, status: 'queued', requestedBy: 'cli' })
 		.returning();
 	const claimed = await claimNext(); // claims the row we just made
-	await runOne(claimed ?? run);
+	await runOne(claimed ?? run, publish);
 }
 
-function parseArgs(argv: string[]): { mode?: string; max?: number; once: boolean } {
-	const out: { mode?: string; max?: number; once: boolean } = { once: false };
+function parseArgs(argv: string[]): {
+	mode?: string;
+	max?: number;
+	once: boolean;
+	publish: boolean;
+} {
+	const out: { mode?: string; max?: number; once: boolean; publish: boolean } = {
+		once: false,
+		publish: false
+	};
 	for (let i = 0; i < argv.length; i++) {
 		if (argv[i] === '--mode') out.mode = argv[++i];
 		else if (argv[i] === '--max') out.max = Number(argv[++i]);
 		else if (argv[i] === '--once') out.once = true;
+		else if (argv[i] === '--publish') out.publish = true;
 	}
 	return out;
 }
@@ -177,9 +192,9 @@ function parseArgs(argv: string[]): { mode?: string; max?: number; once: boolean
 const args = parseArgs(process.argv.slice(2));
 await ensureSchema();
 if (args.mode || args.once) {
-	await enqueueAndRunOnce(args.mode ?? 'estimate', args.max);
+	await enqueueAndRunOnce(args.mode ?? 'estimate', args.publish, args.max);
 	process.exit(0);
 } else {
-	await pollLoop();
+	await pollLoop(args.publish);
 	process.exit(0);
 }

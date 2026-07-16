@@ -66,8 +66,12 @@ SYNC_SCHEDULE_MINUTES=60 bun run worker
 bun run worker/index.ts --mode estimate --max 80 --once
 bun run worker/index.ts --mode crawl --once
 
-# Local dev: crawl into the local blob cache (.cache/blobs), no R2 needed
-BLOB_STORE=local bun run worker/index.ts --mode crawl --max 30 --once
+# Local dev: crawl into the local blob cache (.cache/blobs) — default holds blobs
+# local-only, no R2 needed:
+bun run worker/index.ts --mode crawl --max 30 --once
+
+# Publish through to R2 (the canonical archive) as it crawls — prod shape (needs R2_*):
+bun run worker --publish
 ```
 
 > **Restart after pulling code.** Bun does not hot-reload a running `bun run`
@@ -77,26 +81,36 @@ BLOB_STORE=local bun run worker/index.ts --mode crawl --max 30 --once
 > Tell-tale: a `sync` run stuck in `current_phase='crawling'` with no tier-0
 > resources or unfetched frontier rows — that's an old worker.
 
-## Blob storage & local ↔ R2 sync
+## Blob storage: R2 canonical + opt-in publishing
 
-Bodies are stored content-addressed (by sha256). Two backends, chosen by
-`BLOB_STORE` (`auto` = R2 if configured, else the local cache):
+Bodies are stored content-addressed (by sha256). R2 is the **canonical durable
+archive**, but publishing to it is **opt-in**:
 
-- **local** — `.cache/blobs` (or `BLOB_DIR`). Free, great for dev/testing.
-- **r2** — Cloudflare R2, for remote persistence.
+- **local** — `.cache/blobs` (or `BLOB_DIR`). The dev/staging store. Every crawl
+  writes new bytes here first.
+- **r2** — Cloudflare R2. Written **through** only when the worker runs with
+  `--publish` (prod passes it). A default run holds blobs local-only, so a
+  dev/experimental crawl can't pollute the archive.
 
-Because keys are immutable, moving objects between them is a plain
-copy-what's-missing — no conflicts:
+`blob.r2_synced_at` is the publish marker — null until an object is confirmed in
+R2, then stamped (on a `--publish` write-through or a `blobs:push` promotion). It
+doubles as the held/pending-publish queue (`r2_synced_at IS NULL`).
+
+Because keys are immutable, promoting/reconciling is a plain copy-what's-missing —
+no conflicts:
 
 ```bash
-bun run blobs:push    # local  -> R2   (upload objects R2 doesn't have)
-bun run blobs:pull    # R2     -> local (download objects the cache lacks)
+bun run blobs:push    # promote held (r2_synced_at IS NULL) blobs -> R2, then stamp them
+bun run blobs:pull    # R2 -> local (download objects the cache lacks)
 bun run blobs:sync    # reconcile both directions
 bun run worker/sync-blobs.ts --both --dry-run   # preview
 ```
 
-Typical workflow: crawl locally (cheap, `BLOB_STORE=local`), then
-`bun run blobs:push` to persist to R2.
+`blobs:push` is marker-aware: only held blobs are considered, so a second push
+right after copies nothing. There is no automatic/scheduled sync.
+
+Typical workflow: crawl locally (default, no `--publish`), then
+`bun run blobs:push` to persist to R2 — or run the worker with `--publish`.
 
 ## Environment
 

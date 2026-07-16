@@ -1,7 +1,7 @@
 // Server-side control plane + read models for the sync dashboard. The web app
 // never talks to the worker directly: it enqueues sync_run rows and writes the
 // `control` column; the worker polls, executes, and writes back progress here.
-import { and, count, desc, eq, inArray, isNotNull, like, or, sql } from 'drizzle-orm';
+import { and, count, desc, eq, inArray, isNotNull, isNull, like, or, sql } from 'drizzle-orm';
 import { db } from '$lib/server/db';
 import { blob, crawlEvent, link, resource, resourceVersion, syncRun } from '$lib/server/db/schema';
 
@@ -88,6 +88,15 @@ export async function getOverview() {
 		links: links?.total ?? 0,
 		versions: versions?.total ?? 0
 	};
+}
+
+/** How many blobs are held locally but not yet confirmed in R2 (the canonical
+ *  archive) — i.e. `r2_synced_at IS NULL`. This is the "pending publish" backlog
+ *  that a `--publish` run or `blobs:push` drains. Exposed for the dashboard /
+ *  publish tooling to surface; not rendered here. */
+export async function getUnpublishedBlobCount(): Promise<number> {
+	const [row] = await db.select({ n: count() }).from(blob).where(isNull(blob.r2SyncedAt));
+	return row?.n ?? 0;
 }
 
 export async function getRecentRuns(limit = 10) {
