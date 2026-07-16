@@ -258,8 +258,12 @@ rebuilding an in-memory BFS each run. Two columns drive it:
   per-tier TTL.
 
 A run: refresh seeds (sitemap → core tier, module roots) → drain all _due_
-resources `ORDER BY priority, nextFetchAt` in batches → each fetch reschedules
-itself and enqueues newly-discovered URLs as due-now → stop when nothing is due.
+resources `ORDER BY (last_fetched_at IS NULL) DESC, priority, nextFetchAt` in
+batches → each fetch reschedules itself and enqueues newly-discovered URLs as
+due-now → stop when nothing is due. The `IS NULL` clause is **completeness before
+freshness**: never-seen URLs (in priority order) are fetched before re-verifying
+ones we already hold — so new content (e.g. thousands of documents) is captured
+before we spend requests re-checking pages we already have.
 
 This gives all four properties at once:
 
