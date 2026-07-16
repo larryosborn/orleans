@@ -70,6 +70,13 @@ bun run worker/index.ts --mode crawl --once
 BLOB_STORE=local bun run worker/index.ts --mode crawl --max 30 --once
 ```
 
+> **Restart after pulling code.** Bun does not hot-reload a running `bun run`
+> process — it keeps the modules it loaded at startup. A worker started before a
+> code change keeps running the old behavior (e.g. a pre-`sync` worker will
+> execute a `sync` run as a plain BFS crawl). Restart it after deploying/pulling.
+> Tell-tale: a `sync` run stuck in `current_phase='crawling'` with no tier-0
+> resources or unfetched frontier rows — that's an old worker.
+
 ## Blob storage & local ↔ R2 sync
 
 Bodies are stored content-addressed (by sha256). Two backends, chosen by

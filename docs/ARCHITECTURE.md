@@ -181,8 +181,8 @@ Default seeded login (local/mock DB): `admin@example.com` / `password`.
 **Production**
 
 1. Web app → Vercel or Cloudflare. Set `DATABASE_URL` (Turso `libsql://…`) +
-   `DATABASE_AUTH_TOKEN` + `ORIGIN` + `BETTER_AUTH_SECRET`. Tables auto-create on
-   first request.
+   `DATABASE_AUTH_TOKEN` + `ORIGIN` + `BETTER_AUTH_SECRET`, and the `R2_*` vars so
+   the dashboard can presign archived copies (§5). Tables auto-create on first request.
 2. Blob store → create an R2 bucket + token, set `R2_*` (see below).
 3. Worker → run `bun run worker` on an always-on host with the same
    `DATABASE_URL`/`DATABASE_AUTH_TOKEN` + `R2_*`. Drive it from `/dashboard`.
@@ -193,22 +193,22 @@ Default seeded login (local/mock DB): `admin@example.com` / `password`.
 
 Full list in [`.env.example`](../.env.example).
 
-| Var                                                                       | Used by      | Notes                                                              |
-| ------------------------------------------------------------------------- | ------------ | ------------------------------------------------------------------ |
-| `DATABASE_URL`                                                            | app + worker | Turso `libsql://…` (or `file:` locally)                            |
-| `DATABASE_AUTH_TOKEN`                                                     | app + worker | Required for remote Turso                                          |
-| `ORIGIN`, `BETTER_AUTH_SECRET`                                            | app          | Auth                                                               |
-| `BLOB_STORE`                                                              | worker       | `auto` \| `local` \| `r2` (default `auto`)                         |
-| `BLOB_DIR`                                                                | worker       | Local cache dir (default `.cache/blobs`)                           |
-| `R2_ENDPOINT` / `R2_BUCKET` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | worker       | Cloudflare R2 (S3 API). Only crawl/recrawl + `blobs:*` need these. |
-| `CRAWLER_USER_AGENT`                                                      | worker       | How the crawler identifies itself (see §13).                       |
-| `CRAWLER_RATE_LIMIT` / `CRAWLER_RATE_LIMIT_JITTER`                        | worker       | Base seconds between requests + random extra 0..N (non-periodic).  |
-| `CRAWLER_MAX_PAGES`                                                       | worker       | Hard safety cap per run.                                           |
-| `CRAWLER_MAX_DOC_BYTES`                                                   | worker       | Skip downloading docs over N bytes (0 = pages-only). See §4.       |
-| `CRAWLER_SEEDS`                                                           | worker       | Comma-separated paths/URLs to override the default seeds.          |
-| `CRAWLER_TTL_{CORE,PAGE,AGENDA,DOC}_DAYS`                                 | worker       | `sync` per-tier freshness TTLs (default 7/7/30/180). See §11.      |
-| `CRAWLER_SYNC_BATCH` / `CRAWLER_ERROR_BACKOFF_HOURS`                      | worker       | `sync` claim batch size / failed-URL re-schedule delay.            |
-| `SYNC_SCHEDULE_MINUTES` / `WORKER_STALE_MINUTES`                          | worker       | Auto-enqueue `sync` this often (0=off); reap crashed runs. §11.    |
+| Var                                                                       | Used by      | Notes                                                                                                             |
+| ------------------------------------------------------------------------- | ------------ | ----------------------------------------------------------------------------------------------------------------- |
+| `DATABASE_URL`                                                            | app + worker | Turso `libsql://…` (or `file:` locally)                                                                           |
+| `DATABASE_AUTH_TOKEN`                                                     | app + worker | Required for remote Turso                                                                                         |
+| `ORIGIN`, `BETTER_AUTH_SECRET`                                            | app          | Auth                                                                                                              |
+| `BLOB_STORE`                                                              | worker       | `auto` \| `local` \| `r2` (default `auto`)                                                                        |
+| `BLOB_DIR`                                                                | worker       | Local cache dir (default `.cache/blobs`)                                                                          |
+| `R2_ENDPOINT` / `R2_BUCKET` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | worker + app | Cloudflare R2 (S3 API). Worker for crawl/recrawl + `blobs:*`; the app presigns them to view archived copies (§5). |
+| `CRAWLER_USER_AGENT`                                                      | worker       | How the crawler identifies itself (see §13).                                                                      |
+| `CRAWLER_RATE_LIMIT` / `CRAWLER_RATE_LIMIT_JITTER`                        | worker       | Base seconds between requests + random extra 0..N (non-periodic).                                                 |
+| `CRAWLER_MAX_PAGES`                                                       | worker       | Hard safety cap per run.                                                                                          |
+| `CRAWLER_MAX_DOC_BYTES`                                                   | worker       | Skip downloading docs over N bytes (0 = pages-only). See §4.                                                      |
+| `CRAWLER_SEEDS`                                                           | worker       | Comma-separated paths/URLs to override the default seeds.                                                         |
+| `CRAWLER_TTL_{CORE,PAGE,AGENDA,DOC}_DAYS`                                 | worker       | `sync` per-tier freshness TTLs (default 7/7/30/180). See §11.                                                     |
+| `CRAWLER_SYNC_BATCH` / `CRAWLER_ERROR_BACKOFF_HOURS`                      | worker       | `sync` claim batch size / failed-URL re-schedule delay.                                                           |
+| `SYNC_SCHEDULE_MINUTES` / `WORKER_STALE_MINUTES`                          | worker       | Auto-enqueue `sync` this often (0=off); reap crashed runs. §11.                                                   |
 
 ---
 
