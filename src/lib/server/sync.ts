@@ -94,6 +94,46 @@ export async function getRecentRuns(limit = 10) {
 	return db.select().from(syncRun).orderBy(desc(syncRun.requestedAt)).limit(limit);
 }
 
+export interface SyncProgress {
+	totalResources: number;
+	fetched: number;
+	dueRemaining: number;
+	coreTotal: number;
+	coreFetched: number;
+	documents: number;
+	blobObjects: number;
+	storedBytes: number;
+}
+
+/** Live archive progress, for the sync status card. Core coverage is the headline
+ *  (fetched sitemap pages / total core); `dueRemaining` is the frontier work left. */
+export async function getSyncProgress(): Promise<SyncProgress> {
+	const now = Date.now();
+	const [r] = await db
+		.select({
+			total: count(),
+			fetched: sql<number>`sum(case when ${resource.lastFetchedAt} is not null then 1 else 0 end)`,
+			dueRemaining: sql<number>`sum(case when ${resource.state} != 'gone' and (${resource.nextFetchAt} is null or ${resource.nextFetchAt} <= ${now}) then 1 else 0 end)`,
+			coreTotal: sql<number>`sum(case when ${resource.priority} = 0 then 1 else 0 end)`,
+			coreFetched: sql<number>`sum(case when ${resource.priority} = 0 and ${resource.lastFetchedAt} is not null then 1 else 0 end)`,
+			documents: sql<number>`sum(case when ${resource.kind} = 'document' and ${resource.lastFetchedAt} is not null then 1 else 0 end)`
+		})
+		.from(resource);
+	const [b] = await db
+		.select({ objects: count(), bytes: sql<number>`coalesce(sum(${blob.sizeBytes}), 0)` })
+		.from(blob);
+	return {
+		totalResources: r?.total ?? 0,
+		fetched: Number(r?.fetched ?? 0),
+		dueRemaining: Number(r?.dueRemaining ?? 0),
+		coreTotal: Number(r?.coreTotal ?? 0),
+		coreFetched: Number(r?.coreFetched ?? 0),
+		documents: Number(r?.documents ?? 0),
+		blobObjects: b?.objects ?? 0,
+		storedBytes: Number(b?.bytes ?? 0)
+	};
+}
+
 export async function getLastCompletedRun() {
 	const [row] = await db
 		.select()

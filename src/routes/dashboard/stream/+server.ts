@@ -10,6 +10,7 @@ import type { SyncRun } from '$lib/server/db/crawl.schema';
 import * as sync from '$lib/server/sync';
 
 const POLL_MS = 1500;
+const AGG_MS = 4500; // refresh the heavier progress aggregates less often than the run row
 const MAX_DURATION_MS = 5 * 60 * 1000;
 
 function serialize(r: SyncRun) {
@@ -59,10 +60,17 @@ export const GET: RequestHandler = async ({ locals, request }) => {
 			// Reconnection delay hint for EventSource.
 			controller.enqueue(encoder.encode('retry: 3000\n\n'));
 
+			// Aggregate progress is heavier than the run row, so refresh it less often.
+			let lastAgg = 0;
+			let agg: sync.SyncProgress | null = null;
 			const tick = async () => {
 				try {
 					const active = await sync.getActiveRun();
-					send('progress', active ? serialize(active) : null);
+					if (Date.now() - lastAgg >= AGG_MS) {
+						lastAgg = Date.now();
+						agg = await sync.getSyncProgress();
+					}
+					send('progress', { run: active ? serialize(active) : null, progress: agg });
 				} catch {
 					// transient DB error — next tick retries
 				}

@@ -13,27 +13,49 @@
 	const o = $derived(data.overview);
 	const dedupSavings = $derived(Math.max(0, o.logicalBytes - o.storedBytes));
 
-	// Live active-run state. `streamed` is fed by the SSE stream; until the first
-	// event arrives (and while disconnected) we fall back to the server-loaded
-	// value, so the status card reflects progress without a page reload.
+	// Live state fed by the SSE stream (`{ run, progress }`); until the first event
+	// (and while disconnected) we fall back to the server-loaded values.
 	let streamed = $state<typeof data.active | undefined>(undefined);
+	let streamedProgress = $state<typeof data.progress | undefined>(undefined);
 	const active = $derived(streamed !== undefined ? streamed : data.active);
+	const progress = $derived(streamedProgress ?? data.progress);
 	let connected = $state(false);
+
+	// Core coverage % (headline), request rate, and ETA for the remaining frontier.
+	const corePct = $derived(
+		progress.coreTotal > 0 ? Math.round((progress.coreFetched / progress.coreTotal) * 100) : 0
+	);
+	// Overall = the long tail: fetched / everything known (grows as documents are discovered).
+	const overallPct = $derived(
+		progress.totalResources > 0 ? Math.round((progress.fetched / progress.totalResources) * 100) : 0
+	);
+	const ratePerMin = $derived.by(() => {
+		if (!active?.startedAt) return 0;
+		const min = (Date.now() - active.startedAt.getTime()) / 60000;
+		return min > 0.05 ? Math.round(active.requestsMade / min) : 0;
+	});
+	const etaText = $derived.by(() => {
+		if (!active || ratePerMin <= 0 || progress.dueRemaining <= 0) return null;
+		const m = Math.ceil(progress.dueRemaining / ratePerMin);
+		return m >= 60 ? `~${Math.floor(m / 60)}h ${m % 60}m` : `~${m}m`;
+	});
 
 	onMount(() => {
 		const es = new EventSource('/dashboard/stream');
 		es.addEventListener('progress', (e) => {
 			const p = JSON.parse((e as MessageEvent).data);
 			const wasActive = !!active;
-			streamed = p
+			const run = p?.run ?? null;
+			streamed = run
 				? {
-						...p,
-						heartbeatAt: p.heartbeatAt ? new Date(p.heartbeatAt) : null,
-						startedAt: p.startedAt ? new Date(p.startedAt) : null
+						...run,
+						heartbeatAt: run.heartbeatAt ? new Date(run.heartbeatAt) : null,
+						startedAt: run.startedAt ? new Date(run.startedAt) : null
 					}
 				: null;
+			if (p?.progress) streamedProgress = p.progress;
 			// When the active run ends, refresh aggregates (tiles, feed, alert).
-			if (wasActive && !p) invalidateAll();
+			if (wasActive && !run) invalidateAll();
 		});
 		es.onopen = () => (connected = true);
 		es.onerror = () => (connected = false);
@@ -55,6 +77,21 @@
 		return 'outline';
 	}
 </script>
+
+{#snippet coverageBar(label: string, done: number, total: number, pct: number, unit: string)}
+	<div class="space-y-1">
+		<div class="flex justify-between text-xs">
+			<span class="font-medium">{label}</span>
+			<span class="text-muted-foreground">
+				{pct}% · {formatNumber(done)}/{formatNumber(total)}
+				{unit}
+			</span>
+		</div>
+		<div class="h-2 w-full overflow-hidden rounded-full bg-muted">
+			<div class="h-full rounded-full bg-primary transition-all" style="width:{pct}%"></div>
+		</div>
+	</div>
+{/snippet}
 
 <div class="space-y-6">
 	<!-- Worker-health alert ----------------------------------------------- -->
@@ -101,9 +138,6 @@
 		</Card.Header>
 		<Card.Content>
 			{#if active}
-				{@const pct = active.maxPages
-					? Math.min(100, Math.round((active.requestsMade / active.maxPages) * 100))
-					: null}
 				<div class="space-y-3">
 					<div class="flex flex-wrap items-baseline gap-x-6 gap-y-1 text-sm">
 						<span class="font-medium capitalize">{active.mode} run</span>
@@ -111,19 +145,30 @@
 							{formatNumber(active.requestsMade)} requests
 							{#if active.maxPages}/ {formatNumber(active.maxPages)} cap{/if}
 						</span>
-						<span class="text-muted-foreground">
-							heartbeat {formatRelative(active.heartbeatAt)}
-						</span>
+						<span class="text-muted-foreground">heartbeat {formatRelative(active.heartbeatAt)}</span
+						>
 						<span class="text-muted-foreground">
 							running {formatDuration(active.startedAt?.getTime())}
 						</span>
 					</div>
 
-					{#if pct !== null}
-						<div class="h-2 w-full overflow-hidden rounded-full bg-muted">
-							<div class="h-full rounded-full bg-primary transition-all" style="width:{pct}%"></div>
-						</div>
-					{/if}
+					<!-- Coverage: core (the site's pages) + overall (long tail incl. documents) -->
+					<div class="space-y-2">
+						{@render coverageBar(
+							'Core site coverage',
+							progress.coreFetched,
+							progress.coreTotal,
+							corePct,
+							'pages'
+						)}
+						{@render coverageBar(
+							'Overall (incl. documents)',
+							progress.fetched,
+							progress.totalResources,
+							overallPct,
+							'resources'
+						)}
+					</div>
 
 					{#if active.currentUrl}
 						<p class="truncate font-mono text-xs text-muted-foreground" title={active.currentUrl}>
@@ -132,19 +177,17 @@
 					{/if}
 
 					<div class="grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
-						<div><span class="text-muted-foreground">pages</span> {formatNumber(active.pages)}</div>
-						<div>
-							<span class="text-muted-foreground">docs</span>
-							{formatNumber(active.documents)}
-						</div>
-						<div>
-							<span class="text-muted-foreground">changed</span>
-							{formatNumber(active.newCount + active.changedCount)}
-						</div>
-						<div>
-							<span class="text-muted-foreground">errors</span>
-							{formatNumber(active.errorCount)}
-						</div>
+						{#snippet stat(label: string, value: string)}
+							<div><span class="text-muted-foreground">{label}</span> {value}</div>
+						{/snippet}
+						{@render stat('archived', formatNumber(progress.fetched))}
+						{@render stat('documents', formatNumber(progress.documents))}
+						{@render stat('stored', formatBytes(progress.storedBytes))}
+						{@render stat('due', formatNumber(progress.dueRemaining))}
+						{@render stat('rate', ratePerMin ? `${ratePerMin}/min` : '—')}
+						{@render stat('eta', etaText ?? '—')}
+						{@render stat('changed', formatNumber(active.newCount + active.changedCount))}
+						{@render stat('errors', formatNumber(active.errorCount))}
 					</div>
 
 					<div class="flex gap-2 pt-1">
@@ -166,12 +209,34 @@
 					</div>
 				</div>
 			{:else if data.lastRun}
-				<p class="text-sm text-muted-foreground">
-					No active run. Last run: <span class="capitalize">{data.lastRun.mode}</span>
-					<Badge variant={statusVariant(data.lastRun.status)}>{data.lastRun.status}</Badge>
-					· {formatRelative(data.lastRun.finishedAt)} ·
-					{formatNumber(data.lastRun.pages)} pages, {formatNumber(data.lastRun.documents)} docs
-				</p>
+				<div class="space-y-3">
+					<p class="text-sm text-muted-foreground">
+						No active run. Last run: <span class="capitalize">{data.lastRun.mode}</span>
+						<Badge variant={statusVariant(data.lastRun.status)}>{data.lastRun.status}</Badge>
+						· {formatRelative(data.lastRun.finishedAt)}
+					</p>
+					<div class="space-y-2">
+						{@render coverageBar(
+							'Core site coverage',
+							progress.coreFetched,
+							progress.coreTotal,
+							corePct,
+							'pages'
+						)}
+						{@render coverageBar(
+							'Overall (incl. documents)',
+							progress.fetched,
+							progress.totalResources,
+							overallPct,
+							'resources'
+						)}
+					</div>
+					<p class="text-xs text-muted-foreground">
+						{formatNumber(progress.fetched)} archived · {formatNumber(progress.documents)} documents ·
+						{formatBytes(progress.storedBytes)} stored
+						{#if progress.dueRemaining > 0}· {formatNumber(progress.dueRemaining)} due{/if}
+					</p>
+				</div>
 			{:else}
 				<p class="text-sm text-muted-foreground">No runs yet. Start one below.</p>
 			{/if}
