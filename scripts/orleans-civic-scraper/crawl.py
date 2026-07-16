@@ -207,11 +207,141 @@ def crawl(max_pages: int, recrawl: bool) -> None:
     print(f"\ndone: {fetched} fetches this run, queue had {len(queue)} remaining")
 
 
-def fetch(session: requests.Session, url: str, headers: dict) -> requests.Response | None:
+def human_bytes(n: float) -> str:
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            return f"{n:.1f} {unit}"
+        n /= 1024
+
+
+def estimate(max_pages: int) -> None:
+    """Dry run: discover the full crawl frontier and tally counts + bytes
+    WITHOUT downloading document bodies or touching disk/manifest.
+
+    HTML/XML pages are fetched (bodies are needed to extract links for BFS),
+    but documents are only probed: the streamed request is closed after the
+    headers arrive, so we read Content-Length without pulling the file down.
+    """
+    session = requests.Session()
+    session.headers["User-Agent"] = config.USER_AGENT
+
+    robots = urllib.robotparser.RobotFileParser()
+    robots.set_url(config.BASE_URL + "/robots.txt")
+    try:
+        robots.read()
+    except Exception:
+        print("warning: could not read robots.txt; proceeding cautiously")
+
+    queue: deque[str] = deque(
+        normalize(urljoin(config.BASE_URL, p)) for p in config.SEED_PATHS
+    )
+    seen: set[str] = set()
+
+    n_html = n_docs = n_maps = requests_made = 0
+    n_robots_blocked = n_errors = n_docs_unknown = 0
+    html_bytes = doc_bytes = 0
+    doc_counts: dict[str, int] = {}
+
+    while queue and requests_made < max_pages:
+        url = queue.popleft()
+        if url in seen or not in_scope(url):
+            continue
+        seen.add(url)
+
+        if not robots.can_fetch(config.USER_AGENT, url):
+            n_robots_blocked += 1
+            continue
+
+        resp = fetch(session, url, {}, stream=True)
+        requests_made += 1
+        if resp is None:
+            n_errors += 1
+            continue
+        try:
+            if resp.status_code != 200:
+                n_errors += 1
+                continue
+
+            ctype = resp.headers.get("Content-Type", "").split(";")[0].strip().lower()
+
+            if ctype in config.DOC_CONTENT_TYPES:
+                n_docs += 1
+                ext = config.DOC_CONTENT_TYPES[ctype]
+                doc_counts[ext] = doc_counts.get(ext, 0) + 1
+                clen = resp.headers.get("Content-Length")
+                if clen and clen.isdigit():
+                    doc_bytes += int(clen)
+                else:
+                    n_docs_unknown += 1
+                # don't read the body -- close to release without downloading
+                continue
+
+            if "html" in ctype or "xml" in ctype:
+                text = resp.text  # consumes the (already small) HTML body
+                if (url.endswith("sitemap.xml")
+                        or "<urlset" in text[:500] or "<sitemapindex" in text[:500]):
+                    n_maps += 1
+                    for u in parse_sitemap(text):
+                        nu = normalize(u)
+                        if nu not in seen and in_scope(nu):
+                            queue.append(nu)
+                    continue
+                n_html += 1
+                html_bytes += len(text.encode("utf-8", errors="replace"))
+                for link in extract_links(url, text):
+                    if link not in seen:
+                        queue.append(link)
+            # anything else (images, etc.): ignored, matching the real crawl
+        finally:
+            resp.close()
+
+        if requests_made % 100 == 0:
+            print(f"  ...{requests_made} probed "
+                  f"({n_html} html, {n_docs} docs, {human_bytes(doc_bytes)} so far)")
+
+        time.sleep(config.RATE_LIMIT_SECONDS)
+
+    projected_unknown = ""
+    if n_docs_unknown:
+        avg = doc_bytes / (n_docs - n_docs_unknown) if n_docs > n_docs_unknown else 0
+        projected_unknown = (
+            f"  (+{n_docs_unknown} docs sent no Content-Length; "
+            f"~{human_bytes(avg * n_docs_unknown)} more at observed avg)"
+        )
+
+    print("\n" + "=" * 60)
+    print("CRAWL ESTIMATE (dry run -- nothing saved)")
+    print("=" * 60)
+    print(f"requests issued this probe : {requests_made:>8,}")
+    print(f"sitemaps parsed            : {n_maps:>8,}")
+    print(f"HTML pages                 : {n_html:>8,}   {human_bytes(html_bytes):>10}")
+    print(f"documents                  : {n_docs:>8,}   {human_bytes(doc_bytes):>10}")
+    for ext, c in sorted(doc_counts.items(), key=lambda kv: -kv[1]):
+        print(f"    {ext:<6}                 : {c:>8,}")
+    if projected_unknown:
+        print(projected_unknown)
+    print("-" * 60)
+    fetches = n_html + n_docs
+    print(f"real-crawl fetches (pages+docs): {fetches:>8,}")
+    print(f"estimated download size        : {human_bytes(html_bytes + doc_bytes):>10}")
+    eta = fetches * config.RATE_LIMIT_SECONDS
+    print(f"min wall time @ {config.RATE_LIMIT_SECONDS}s/req      : "
+          f"~{eta / 3600:.1f} h ({eta / 60:.0f} min), plus download time")
+    if requests_made >= max_pages:
+        print(f"\nNOTE: hit --max={max_pages}; frontier not exhausted, "
+              f"true totals are higher. Re-run with a larger --max.")
+    if n_robots_blocked or n_errors:
+        print(f"\n(skipped {n_robots_blocked} robots-blocked, "
+              f"{n_errors} errors/non-200)")
+
+
+def fetch(session: requests.Session, url: str, headers: dict,
+          stream: bool = False) -> requests.Response | None:
     delay = config.RETRY_BACKOFF
     for attempt in range(config.MAX_RETRIES):
         try:
-            resp = session.get(url, headers=headers, timeout=config.REQUEST_TIMEOUT)
+            resp = session.get(url, headers=headers, stream=stream,
+                               timeout=config.REQUEST_TIMEOUT)
             if resp.status_code in (429, 503):
                 wait = int(resp.headers.get("Retry-After", delay))
                 print(f"  throttled ({resp.status_code}); sleeping {wait}s")
@@ -260,9 +390,15 @@ if __name__ == "__main__":
     ap.add_argument("--max", type=int, default=config.MAX_PAGES)
     ap.add_argument("--recrawl", action="store_true",
                     help="revisit known URLs with conditional GETs")
+    ap.add_argument("--estimate", action="store_true",
+                    help="dry run: tally page/doc counts and bytes without "
+                         "downloading document bodies or writing anything")
     args = ap.parse_args()
     try:
-        crawl(args.max, args.recrawl)
+        if args.estimate:
+            estimate(args.max)
+        else:
+            crawl(args.max, args.recrawl)
     except KeyboardInterrupt:
         print("\ninterrupted -- progress saved; rerun to resume")
         sys.exit(1)

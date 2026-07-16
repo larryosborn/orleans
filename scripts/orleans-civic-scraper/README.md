@@ -1,4 +1,11 @@
-# Orleans Civic Scraper
+# Orleans Civic Scraper (legacy Python prototype)
+
+> **Status: superseded.** The crawl / archive / change-tracking now lives in the
+> TypeScript **sync worker** ([`worker/`](../../worker/README.md)), writing to
+> Turso and R2 with a dashboard — see
+> [`docs/ARCHITECTURE.md`](../../docs/ARCHITECTURE.md). This Python pipeline is
+> kept for reference and for its `extract → index → chat` (RAG) stages, which
+> haven't been ported yet. Use the worker for crawling.
 
 A four-stage pipeline that turns town.orleans.ma.us (a CivicPlus site) into a clean, searchable corpus with a citation-backed RAG chatbot on top.
 

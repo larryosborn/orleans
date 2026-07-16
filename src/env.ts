@@ -38,6 +38,23 @@ const requiredAtRuntime = {
 	}
 };
 
+// Required in production at runtime, but optional during build and in dev. In
+// dev the app derives its origin from the incoming request (see auth.ts), so
+// running multiple dev servers on different ports just works — no ORIGIN needed.
+const requiredInProduction = {
+	'~standard': {
+		version: 1 as const,
+		vendor: 'orleans',
+		validate: (value: unknown) => {
+			if (!value && !building && !import.meta.env.DEV) {
+				return { issues: [{ message: 'Value is missing.' }] };
+			}
+			return { value: value ? String(value) : undefined };
+		},
+		types: undefined as unknown as { input: string | undefined; output: string | undefined }
+	}
+};
+
 export const variables = defineEnvVars({
 	DATABASE_URL: {
 		description: 'The database connection string.',
@@ -49,8 +66,10 @@ export const variables = defineEnvVars({
 		schema: optionalString
 	},
 	ORIGIN: {
-		description: 'The app origin (base URL), e.g. `http://localhost:5173`.',
-		schema: requiredAtRuntime
+		description:
+			'The app origin (base URL), e.g. `https://example.com`. Required in production; ' +
+			'in dev the origin is derived from the request, so any port works without it.',
+		schema: requiredInProduction
 	},
 	BETTER_AUTH_SECRET: {
 		description:
