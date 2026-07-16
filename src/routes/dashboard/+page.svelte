@@ -127,17 +127,14 @@
 		if (s === 'completed') return 'secondary';
 		return 'outline';
 	}
+	// Badge colour for a change/outcome/state token: new → primary, gone/error →
+	// destructive, changed → secondary, everything else (probed / active /
+	// unchanged re-verify) → outline. Shared by the change feed and the panel.
 	function changeVariant(k: string): 'default' | 'secondary' | 'destructive' | 'outline' {
 		if (k === 'new') return 'default';
 		if (k === 'gone' || k === 'error') return 'destructive';
 		if (k === 'changed') return 'secondary';
 		return 'outline';
-	}
-	function outcomeVariant(o: string): 'default' | 'secondary' | 'destructive' | 'outline' {
-		if (o === 'new') return 'default';
-		if (o === 'gone' || o === 'error') return 'destructive';
-		if (o === 'changed') return 'secondary';
-		return 'outline'; // probed / active / unchanged re-verify
 	}
 	// Resource type: page / document / other (unknown kinds collapse to "other").
 	const KNOWN_KINDS = new Set(['page', 'document', 'sitemap']);
@@ -343,7 +340,7 @@
 		<Card.Header>
 			<div class="flex items-center justify-between">
 				<Card.Title>Currently processing</Card.Title>
-				<span class="text-xs text-muted-foreground">last 3 records</span>
+				<span class="text-xs text-muted-foreground">most recently fetched</span>
 			</div>
 		</Card.Header>
 		<Card.Content>
@@ -371,7 +368,7 @@
 								{/if}
 								<span class="flex items-center gap-1">
 									current
-									<Badge variant={outcomeVariant(r.currentOutcome ?? r.state)}>
+									<Badge variant={changeVariant(r.currentOutcome ?? r.state)}>
 										{r.currentOutcome ?? r.state}
 									</Badge>
 									{#if r.httpStatus}<span class="tabular-nums">{r.httpStatus}</span>{/if}
@@ -379,7 +376,7 @@
 								<span class="flex items-center gap-1">
 									previous
 									{#if r.previousOutcome}
-										<Badge variant={outcomeVariant(r.previousOutcome)}>{r.previousOutcome}</Badge>
+										<Badge variant={changeVariant(r.previousOutcome)}>{r.previousOutcome}</Badge>
 									{:else}
 										<span>—</span>
 									{/if}
@@ -390,7 +387,7 @@
 				</ul>
 				{#if processing.hasMore}
 					<p class="mt-2 text-xs text-muted-foreground">
-						Showing the 3 most recent · older records truncated
+						Showing the {processing.records.length} most recent · older records truncated
 					</p>
 				{/if}
 			{:else}

@@ -238,20 +238,27 @@ export async function listResources(opts: {
 	return { rows, total };
 }
 
+// Closed value sets for the enriched fields, mirroring the schema's documented
+// column domains (see crawl.schema.ts). Kept as unions so consumers stay
+// exhaustive; the DB stores them as plain text, so reads are cast at the boundary.
+export type ResourceKind = 'page' | 'document' | 'sitemap' | 'other';
+export type ResourceState = 'active' | 'gone' | 'error';
+export type ChangeKind = 'new' | 'changed' | 'probed' | 'gone' | 'error';
+
 export interface ProcessingRecord {
 	id: string;
 	url: string;
 	title: string | null;
 	// type
-	kind: string; // page | document | sitemap | other
+	kind: ResourceKind;
 	contentType: string | null;
 	// current status: resource lifecycle + latest change outcome
-	state: string; // active | gone | error
+	state: ResourceState;
 	httpStatus: number | null;
-	currentOutcome: string | null; // latest resource_version.changeKind
+	currentOutcome: ChangeKind | null; // latest resource_version.changeKind
 	currentAt: number | null; // latest resource_version.observedAt
 	// previous status: the outcome recorded *before* the latest version
-	previousOutcome: string | null; // 2nd-newest resource_version.changeKind
+	previousOutcome: ChangeKind | null; // 2nd-newest resource_version.changeKind
 	// cache age
 	fetchedAt: number | null; // resource.lastFetchedAt
 }
@@ -270,7 +277,6 @@ export interface ProcessingPanel {
  *  version's outcome (current) and the one before it (previous). Fetches `limit + 1`
  *  rows so the caller can flag truncation without a second count query. */
 export async function getProcessingRecords(limit = 3): Promise<ProcessingPanel> {
-	// Fetch one extra row so the caller can flag truncation without a count query.
 	const resources = await db
 		.select({
 			id: resource.id,
@@ -305,17 +311,18 @@ export async function getProcessingRecords(limit = 3): Promise<ProcessingPanel> 
 				.orderBy(desc(resourceVersion.observedAt))
 				.limit(2);
 			const [current, previous] = versions;
+			// Cast the text columns to their documented unions at the read boundary.
 			return {
 				id: r.id,
 				url: r.url,
 				title: r.title,
-				kind: r.kind,
+				kind: r.kind as ResourceKind,
 				contentType: r.contentType,
-				state: r.state,
+				state: r.state as ResourceState,
 				httpStatus: r.httpStatus,
-				currentOutcome: current?.changeKind ?? null,
+				currentOutcome: (current?.changeKind ?? null) as ChangeKind | null,
 				currentAt: current?.observedAt?.getTime() ?? null,
-				previousOutcome: previous?.changeKind ?? null,
+				previousOutcome: (previous?.changeKind ?? null) as ChangeKind | null,
 				fetchedAt: r.lastFetchedAt?.getTime() ?? null
 			};
 		})
