@@ -28,9 +28,10 @@
 	const corePct = $derived(
 		progress.coreTotal > 0 ? Math.round((progress.coreFetched / progress.coreTotal) * 100) : 0
 	);
-	// Overall = the long tail: fetched / everything known (grows as documents are discovered).
-	const overallPct = $derived(
-		progress.totalResources > 0 ? Math.round((progress.fetched / progress.totalResources) * 100) : 0
+	// Documents = the long tail. Shown as its own bar (not blended with the ~complete
+	// page count) so it climbs within its own range instead of dragging the % down.
+	const docPct = $derived(
+		progress.docTotal > 0 ? Math.round((progress.docFetched / progress.docTotal) * 100) : 0
 	);
 	const ratePerMin = $derived.by(() => {
 		if (!active?.startedAt) return 0;
@@ -169,18 +170,18 @@
 							'pages'
 						)}
 						{@render coverageBar(
-							'Overall (incl. documents)',
-							progress.fetched,
-							progress.totalResources,
-							overallPct,
-							'resources'
+							'Documents (PDFs)',
+							progress.docFetched,
+							progress.docTotal,
+							docPct,
+							'docs'
 						)}
 						<p class="text-xs text-muted-foreground">
 							{formatNumber(progress.totalResources)} discovered
 							{#if recentDelta > 0}
 								<span class="text-amber-600 dark:text-amber-500">
-									↑ +{formatNumber(recentDelta)} — still finding new URLs (Overall % settles once page
-									crawling finishes)
+									↑ +{formatNumber(recentDelta)} — still finding new URLs (the Documents total keeps growing
+									until page crawling finishes)
 								</span>
 							{:else}
 								· settling
@@ -242,11 +243,11 @@
 							'pages'
 						)}
 						{@render coverageBar(
-							'Overall (incl. documents)',
-							progress.fetched,
-							progress.totalResources,
-							overallPct,
-							'resources'
+							'Documents (PDFs)',
+							progress.docFetched,
+							progress.docTotal,
+							docPct,
+							'docs'
 						)}
 					</div>
 					<p class="text-xs text-muted-foreground">

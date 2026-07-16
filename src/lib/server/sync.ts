@@ -100,6 +100,8 @@ export interface SyncProgress {
 	dueRemaining: number;
 	coreTotal: number;
 	coreFetched: number;
+	docTotal: number;
+	docFetched: number;
 	documents: number;
 	blobObjects: number;
 	storedBytes: number;
@@ -116,6 +118,8 @@ export async function getSyncProgress(): Promise<SyncProgress> {
 			dueRemaining: sql<number>`sum(case when ${resource.state} != 'gone' and (${resource.nextFetchAt} is null or ${resource.nextFetchAt} <= ${now}) then 1 else 0 end)`,
 			coreTotal: sql<number>`sum(case when ${resource.priority} = 0 then 1 else 0 end)`,
 			coreFetched: sql<number>`sum(case when ${resource.priority} = 0 and ${resource.lastFetchedAt} is not null then 1 else 0 end)`,
+			docTotal: sql<number>`sum(case when ${resource.priority} >= 2 then 1 else 0 end)`,
+			docFetched: sql<number>`sum(case when ${resource.priority} >= 2 and ${resource.lastFetchedAt} is not null then 1 else 0 end)`,
 			documents: sql<number>`sum(case when ${resource.kind} = 'document' and ${resource.lastFetchedAt} is not null then 1 else 0 end)`
 		})
 		.from(resource);
@@ -128,6 +132,8 @@ export async function getSyncProgress(): Promise<SyncProgress> {
 		dueRemaining: Number(r?.dueRemaining ?? 0),
 		coreTotal: Number(r?.coreTotal ?? 0),
 		coreFetched: Number(r?.coreFetched ?? 0),
+		docTotal: Number(r?.docTotal ?? 0),
+		docFetched: Number(r?.docFetched ?? 0),
 		documents: Number(r?.documents ?? 0),
 		blobObjects: b?.objects ?? 0,
 		storedBytes: Number(b?.bytes ?? 0)
