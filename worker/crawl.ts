@@ -467,7 +467,14 @@ export async function executeSync(run: SyncRun): Promise<void> {
 					ne(resource.state, 'gone')
 				)
 			)
-			.orderBy(asc(resource.priority), asc(resource.nextFetchAt))
+			// Completeness before freshness: fetch never-seen URLs first (in priority
+			// order), then re-verify already-have ones. So we capture new content
+			// (e.g. thousands of documents) before re-checking pages we already hold.
+			.orderBy(
+				sql`${resource.lastFetchedAt} is null desc`,
+				asc(resource.priority),
+				asc(resource.nextFetchAt)
+			)
 			.limit(SYNC_BATCH);
 		if (batch.length === 0) break; // caught up
 
