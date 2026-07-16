@@ -4,8 +4,8 @@ import type { SyncRun } from '$lib/server/db/crawl.schema';
 import * as sync from '$lib/server/sync';
 
 export const load: PageServerLoad = async () => {
-	const [overview, active, recent, lastRun, events, eventCounts, storage, feed] = await Promise.all(
-		[
+	const [overview, active, recent, lastRun, events, eventCounts, storage, feed, progress] =
+		await Promise.all([
 			sync.getOverview(),
 			sync.getActiveRun(),
 			sync.getRecentRuns(6),
@@ -13,16 +13,27 @@ export const load: PageServerLoad = async () => {
 			sync.getEvents({ limit: 10 }),
 			sync.getEventCounts(),
 			sync.getStorageByType(),
-			sync.getChangeFeed(10)
-		]
-	);
+			sync.getChangeFeed(10),
+			sync.getSyncProgress()
+		]);
 
 	// Worker-health hint: a run is queued/running in the DB, but is anything
 	// actually processing it? If nothing has claimed a queued run, or a running
 	// run's heartbeat has gone stale, the worker probably isn't running.
 	const workerAlert = detectWorkerAlert(active);
 
-	return { overview, active, recent, lastRun, events, eventCounts, storage, feed, workerAlert };
+	return {
+		overview,
+		active,
+		recent,
+		lastRun,
+		events,
+		eventCounts,
+		storage,
+		feed,
+		progress,
+		workerAlert
+	};
 };
 
 const STALE_HEARTBEAT_MS = 30_000;
