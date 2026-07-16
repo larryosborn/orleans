@@ -9,15 +9,28 @@ const uuid = () => crypto.randomUUID();
 // blob — content-addressed store. One row per unique file *content* (sha256).
 // Identical bytes seen across many URLs/runs dedupe to a single object in R2,
 // so `ref_count` drives storage-savings analytics and eventual GC.
+//
+// R2 is the canonical durable archive, but publishing to it is opt-in. Every
+// blob is first written to the local backend; `r2_synced_at` stays null until
+// the object is *confirmed* present in R2 (a `--publish` write-through or a
+// `blobs:push` promotion stamps it). So `r2_synced_at IS NULL` doubles as the
+// "held / pending publish" queue.
 // ---------------------------------------------------------------------------
-export const blob = sqliteTable('blob', {
-	sha256: text('sha256').primaryKey(),
-	sizeBytes: integer('size_bytes').notNull(),
-	contentType: text('content_type'),
-	storageKey: text('storage_key').notNull(), // object key in R2
-	refCount: integer('ref_count').notNull().default(0),
-	createdAt: integer('created_at', { mode: 'timestamp_ms' }).default(nowMs).notNull()
-});
+export const blob = sqliteTable(
+	'blob',
+	{
+		sha256: text('sha256').primaryKey(),
+		sizeBytes: integer('size_bytes').notNull(),
+		contentType: text('content_type'),
+		storageKey: text('storage_key').notNull(), // content-addressed object key
+		refCount: integer('ref_count').notNull().default(0),
+		// null until the object is confirmed in R2 (the canonical archive); set on a
+		// successful `--publish` write-through or a `blobs:push` promotion.
+		r2SyncedAt: integer('r2_synced_at', { mode: 'timestamp_ms' }),
+		createdAt: integer('created_at', { mode: 'timestamp_ms' }).default(nowMs).notNull()
+	},
+	(t) => [index('blob_r2_synced_idx').on(t.r2SyncedAt)]
+);
 
 // ---------------------------------------------------------------------------
 // resource — one row per unique normalized URL. Stable identity across runs;

@@ -13,7 +13,7 @@ import {
 	syncRun
 } from '../src/lib/server/db/schema';
 import type { SyncRun } from '../src/lib/server/db/crawl.schema';
-import { getStorage } from './storage';
+import { makeBlobWriter, type BlobWriter } from './storage';
 import {
 	BASE_URL,
 	docExtFor,
@@ -95,6 +95,7 @@ interface IngestCtx {
 	maxDocBytes: number | undefined;
 	runId: string;
 	stats: Stats;
+	writer: BlobWriter;
 }
 
 /**
@@ -104,7 +105,7 @@ interface IngestCtx {
  * the frontier `sync` loop so their fetch handling can't drift apart.
  */
 async function ingestResponse(resp: Response, ctx: IngestCtx): Promise<string[]> {
-	const { url, prevId, prevSha, prevSize, mode, maxDocBytes, runId, stats } = ctx;
+	const { url, prevId, prevSha, prevSize, mode, maxDocBytes, runId, stats, writer } = ctx;
 	const ctype = (resp.headers.get('Content-Type') ?? '').split(';')[0].trim().toLowerCase();
 	const etag = resp.headers.get('ETag') ?? undefined;
 	const lastModified = resp.headers.get('Last-Modified') ?? undefined;
@@ -148,7 +149,7 @@ async function ingestResponse(resp: Response, ctx: IngestCtx): Promise<string[]>
 			const sha = sha256Hex(bytes);
 			stats.bytesDownloaded += size;
 			const blobSha =
-				sha !== prevSha ? await ensureBlob(sha, ext, bytes, ctype, size, stats) : null;
+				sha !== prevSha ? await ensureBlob(sha, ext, bytes, ctype, size, stats, writer) : null;
 			await recordObservation({
 				runId,
 				url,
@@ -199,7 +200,7 @@ async function ingestResponse(resp: Response, ctx: IngestCtx): Promise<string[]>
 			stats.bytesDownloaded += size; // bytes actually fetched (original)
 			if (sha !== prevSha) {
 				const bytes = new TextEncoder().encode(normalized);
-				blobSha = await ensureBlob(sha, '.html', bytes, ctype, bytes.byteLength, stats);
+				blobSha = await ensureBlob(sha, '.html', bytes, ctype, bytes.byteLength, stats, writer);
 			}
 		}
 		const resourceId = await recordObservation({
@@ -231,7 +232,7 @@ async function ingestResponse(resp: Response, ctx: IngestCtx): Promise<string[]>
 	return [];
 }
 
-export async function executeRun(run: SyncRun): Promise<void> {
+export async function executeRun(run: SyncRun, opts: { publish?: boolean } = {}): Promise<void> {
 	const mode = run.mode as Mode;
 	const runId = run.id;
 	const maxPages = run.maxPages ?? MAX_PAGES;
@@ -241,9 +242,10 @@ export async function executeRun(run: SyncRun): Promise<void> {
 	// undefined = download all documents; 0 = skip all (pages-only).
 	const params = run.params ? (JSON.parse(run.params) as { maxDocBytes?: number }) : {};
 	const maxDocBytes = typeof params.maxDocBytes === 'number' ? params.maxDocBytes : MAX_DOC_BYTES;
-	// Blob store is chosen by env (R2 in prod, local cache in dev — see storage.ts).
-	// Only crawl/recrawl write bodies; estimate never touches it.
-	if (mode !== 'estimate') console.log(`blob store: ${getStorage().label}`);
+	// Blobs always land in the local backend; R2 write-through is opt-in (--publish).
+	// Only crawl/recrawl write bodies; estimate never touches storage.
+	const writer = makeBlobWriter({ publish: opts.publish ?? false });
+	if (mode !== 'estimate') console.log(`blob store: ${writer.label}`);
 
 	const robots = await Robots.load(BASE_URL);
 	const stats = zeroStats();
@@ -362,7 +364,8 @@ export async function executeRun(run: SyncRun): Promise<void> {
 			mode,
 			maxDocBytes,
 			runId,
-			stats
+			stats,
+			writer
 		});
 		for (const t of targets) {
 			if (!seen.has(t)) {
@@ -389,12 +392,14 @@ export async function executeRun(run: SyncRun): Promise<void> {
 // discovered URLs as due-now — so core pages finish before the long tail, and
 // the run picks up exactly where it left off, only fetching what's stale.
 // ---------------------------------------------------------------------------
-export async function executeSync(run: SyncRun): Promise<void> {
+export async function executeSync(run: SyncRun, opts: { publish?: boolean } = {}): Promise<void> {
 	const runId = run.id;
 	const maxPages = run.maxPages ?? MAX_PAGES;
 	const params = run.params ? (JSON.parse(run.params) as { maxDocBytes?: number }) : {};
 	const maxDocBytes = typeof params.maxDocBytes === 'number' ? params.maxDocBytes : MAX_DOC_BYTES;
-	console.log(`blob store: ${getStorage().label}`);
+	// Blobs always land in the local backend; R2 write-through is opt-in (--publish).
+	const writer = makeBlobWriter({ publish: opts.publish ?? false });
+	console.log(`blob store: ${writer.label}`);
 
 	const robots = await Robots.load(BASE_URL);
 	const stats = zeroStats();
@@ -553,7 +558,8 @@ export async function executeSync(run: SyncRun): Promise<void> {
 				mode: 'sync',
 				maxDocBytes,
 				runId,
-				stats
+				stats,
+				writer
 			});
 			await schedule(r.id, r.priority);
 			const fresh = discovered.filter((t) => !t.endsWith('sitemap.xml'));
@@ -851,31 +857,47 @@ async function upsertResource(r: ResourceUpsert): Promise<string> {
 	return row.id;
 }
 
-/** Content-addressed store: upload if new, dedupe otherwise; track refcount. */
+/** Content-addressed store: write if new, dedupe otherwise; track refcount.
+ *  Bytes always land locally; on a publishing run they also write through to R2
+ *  and `r2_synced_at` is stamped. A blob already held (r2_synced_at IS NULL) that
+ *  a publishing run sees again is promoted to R2 and stamped rather than left. */
 async function ensureBlob(
 	sha: string,
 	ext: string,
 	bytes: Uint8Array,
 	contentType: string,
 	size: number,
-	stats: Stats
+	stats: Stats,
+	writer: BlobWriter
 ): Promise<string> {
+	const now = new Date();
 	const existing = await db
-		.select({ sha256: blob.sha256 })
+		.select({ storageKey: blob.storageKey, r2SyncedAt: blob.r2SyncedAt })
 		.from(blob)
 		.where(eq(blob.sha256, sha))
 		.limit(1);
 	if (existing.length === 0) {
-		const key = await getStorage().putIfAbsent(sha, ext, bytes, contentType);
+		const { key, r2Synced } = await writer.putIfAbsent(sha, ext, bytes, contentType);
 		await db
 			.insert(blob)
-			.values({ sha256: sha, sizeBytes: size, contentType, storageKey: key, refCount: 1 })
+			.values({
+				sha256: sha,
+				sizeBytes: size,
+				contentType,
+				storageKey: key,
+				refCount: 1,
+				r2SyncedAt: r2Synced ? now : null
+			})
 			.onConflictDoUpdate({ target: blob.sha256, set: { refCount: sql`${blob.refCount} + 1` } });
 		stats.bytesStored += size; // newly stored bytes (dedup savings = downloaded - stored)
 	} else {
+		const stampR2 = writer.publish && existing[0].r2SyncedAt === null;
+		const syncedNow = stampR2
+			? await writer.ensurePublished(existing[0].storageKey, bytes, contentType)
+			: false;
 		await db
 			.update(blob)
-			.set({ refCount: sql`${blob.refCount} + 1` })
+			.set({ refCount: sql`${blob.refCount} + 1`, ...(syncedNow ? { r2SyncedAt: now } : {}) })
 			.where(eq(blob.sha256, sha));
 	}
 	return sha;

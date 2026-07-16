@@ -19,8 +19,8 @@ control the sync.
 bun install
 bun run dev            # app + dashboard at http://localhost:5173/dashboard
 
-# crawl into the local cache (no R2 needed), in another shell:
-DATABASE_URL="file:local.db" BLOB_STORE=local \
+# crawl into the local cache (default: no --publish, no R2 needed), in another shell:
+DATABASE_URL="file:local.db" \
   bun run worker/index.ts --mode estimate --max 100 --once
 ```
 

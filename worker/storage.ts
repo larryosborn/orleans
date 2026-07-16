@@ -108,7 +108,7 @@ export function makeR2Storage(): Storage | null {
 }
 
 // ---------------------------------------------------------------------------
-// Backend selection
+// Local backend location
 // ---------------------------------------------------------------------------
 const DEFAULT_LOCAL_DIR = '.cache/blobs';
 
@@ -116,20 +116,58 @@ export function localDir(): string {
 	return process.env.BLOB_DIR ?? DEFAULT_LOCAL_DIR;
 }
 
-/** Which backend the crawler writes to. `BLOB_STORE=r2|local|auto` (default auto:
- *  R2 when its env is set, else the local cache dir `BLOB_DIR` / .cache/blobs). */
-let active: Storage | undefined;
-export function getStorage(): Storage {
-	if (active) return active;
-	const mode = (process.env.BLOB_STORE ?? 'auto').toLowerCase();
-	const r2 = makeR2Storage();
-	if (mode === 'r2') {
-		if (!r2) throw new Error('BLOB_STORE=r2 but R2_* env vars are not set.');
-		active = r2;
-	} else if (mode === 'local') {
-		active = makeLocalStorage(localDir());
-	} else {
-		active = r2 ?? makeLocalStorage(localDir());
+// ---------------------------------------------------------------------------
+// Blob write path (the crawler's view of storage)
+// ---------------------------------------------------------------------------
+// R2 is the canonical durable archive, but publishing to it is *opt-in*. The
+// crawler ALWAYS writes new bytes to the local backend (the dev/staging cache);
+// only when publishing is enabled does it ALSO write-through to R2 and report
+// the object as synced (which stamps `blob.r2_synced_at`). A default run never
+// touches R2, so a dev/experimental crawl can't pollute the canonical archive.
+export interface BlobWriter {
+	/** True when this run writes through to R2 (prod / `--publish`). */
+	readonly publish: boolean;
+	readonly label: string;
+	/** Store bytes under the content-addressed key. Always writes to the local
+	 *  backend; when publishing, also writes-through to R2. Returns the key and
+	 *  whether the object is confirmed present in R2 (drives `blob.r2_synced_at`). */
+	putIfAbsent(
+		sha256: string,
+		ext: string,
+		bytes: Uint8Array,
+		contentType?: string
+	): Promise<{ key: string; r2Synced: boolean }>;
+	/** Promote an already-stored object to R2 (only when publishing). Returns true
+	 *  once the object is confirmed in R2 — so an unpublished blob seen again by a
+	 *  publishing run gets stamped rather than left held. */
+	ensurePublished(key: string, bytes: Uint8Array, contentType?: string): Promise<boolean>;
+}
+
+/** Build the crawler's blob write path. `publish` gates the R2 write-through
+ *  ONLY — the local backend is always written. Publishing requires R2 env. */
+export function makeBlobWriter(opts: { publish: boolean }): BlobWriter {
+	const local = makeLocalStorage(localDir());
+	const r2 = opts.publish ? makeR2Storage() : null;
+	if (opts.publish && !r2) {
+		throw new Error(
+			'--publish requires R2_* env vars (R2_ENDPOINT / R2_BUCKET / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY).'
+		);
 	}
-	return active;
+	return {
+		publish: opts.publish,
+		label: r2
+			? `${local.label} + write-through to ${r2.label}`
+			: `${local.label} — local-only (unpublished; pass --publish to write through to R2)`,
+		async putIfAbsent(sha256, ext, bytes, contentType) {
+			const key = await local.putIfAbsent(sha256, ext, bytes, contentType);
+			if (!r2) return { key, r2Synced: false };
+			await r2.putIfAbsent(sha256, ext, bytes, contentType);
+			return { key, r2Synced: true };
+		},
+		async ensurePublished(key, bytes, contentType) {
+			if (!r2) return false;
+			if (!(await r2.has(key))) await r2.put(key, bytes, contentType);
+			return true;
+		}
+	};
 }

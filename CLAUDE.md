@@ -41,7 +41,7 @@ bun run auth:schema      # regenerate auth tables after editing src/lib/server/a
 ```sh
 bun run worker           # run the sync worker   ·   worker:estimate for a dry count
 # local crawl, no R2 needed:
-DATABASE_URL="file:local.db" BLOB_STORE=local bun run worker/index.ts --mode estimate --max 100 --once
+DATABASE_URL="file:local.db" bun run worker/index.ts --mode estimate --max 100 --once
 bun run blobs:sync       # reconcile local cache ↔ R2 (blobs:push / blobs:pull for one direction)
 ```
 
