@@ -16,6 +16,33 @@ docs: [`worker/README.md`](worker/README.md),
 [`src/routes/dashboard/README.md`](src/routes/dashboard/README.md). Schema changes
 auto-migrate on deploy — never a manual `db:migrate` step.
 
+## Issue-driven workflow
+
+GitHub issues are the front door for all work. Ideas, bugs, and feature requests
+are written as issues, triaged into a small state machine, then picked up by
+agents. The lifecycle and the label vocabulary are owned by the `/triage` skill —
+consult it before changing an issue's state.
+
+**State labels** (exactly one per triaged issue, alongside a category label
+`bug`/`enhancement`): `needs-triage` → `needs-info` / `ready-for-agent` /
+`ready-for-human` / `wontfix`, plus `in-progress` while actively worked. An issue
+only reaches `ready-for-agent` once it carries a self-contained **agent brief**
+comment — that brief, not the original body, is the contract the agent works from.
+
+**Branch / PR / merge conventions** (every agent and human follows these):
+
+- **Worktree per task.** Run each issue in its own git worktree so parallel work
+  never collides. Never commit straight to `main`.
+- **Branch name:** `issue-<number>-<short-slug>` (e.g. `issue-17-status-card`).
+- **Claim first.** Before writing any code, flip the issue to `in-progress` and
+  self-assign — this is the single-writer guard that stops two agents grabbing the
+  same issue (same guarantee the sync worker uses for its single-writer lock).
+- **PR body opens with `Closes #<number>`** so the merge auto-closes the issue.
+- **Verify before handoff.** Run `/verify` and `/code-review` on the branch; move
+  the PR to `ready-for-human` when it's ready to merge.
+- **Squash only.** The repo enforces squash merges (merge + rebase commits are
+  disabled). Merge with `gh pr merge --squash --delete-branch`.
+
 ---
 
 You are able to use the Svelte MCP server, where you have access to comprehensive Svelte 5 and SvelteKit documentation. Here's how to use the available tools effectively:
