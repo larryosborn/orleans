@@ -32,17 +32,24 @@ maps to `params.maxDocBytes` so a run can archive HTML but skip large PDFs
 (0 = pages-only). See [architecture §4](../../../docs/ARCHITECTURE.md).
 
 **Live updates.** The overview opens an `EventSource` to `/dashboard/stream`; the
-status card (progress, counts, current URL, heartbeat, controls) updates without a
-reload, with a green "live" pulse when connected. When a run ends it calls
-`invalidateAll()` to refresh the aggregates. A **worker-health banner** appears when
-a run is queued/running but nothing has claimed it or its heartbeat has gone stale
-(i.e. `bun run worker` isn't running). Read models (`getOverview`, `getActiveRun`,
-`getChangeFeed`, `listResources`, …) are in `sync.ts`.
+status card (progress, counts, current URL, controls) updates without a reload.
+When a run ends it calls `invalidateAll()` to refresh the aggregates. Read models
+(`getOverview`, `getActiveRun`, `getChangeFeed`, `listResources`, …) are in
+`sync.ts`.
+
+**Status chip.** The card header carries a single fixed-width status chip
+(`live` / `paused` / `stale` / `idle`) so the card never reflows as status changes,
+with the Resume/Pause and Cancel controls alongside it. Hover/focus reveals a
+tooltip with worker id, current phase, heartbeat age, and connection state. The
+`stale` state folds in the former worker-health warning — a run that's
+queued/running but unclaimed or whose heartbeat has gone stale (i.e. `bun run
+worker` isn't running) — turning the chip red and surfacing the message in the
+tooltip (and the chip's `aria-label`).
 
 ## UI
 
 Built with the in-repo shadcn-svelte kit (`$lib/components/ui/*`) — card, badge,
-button, table — plus Tailwind. Formatting helpers (bytes, relative time,
+button, tooltip, table — plus Tailwind. Formatting helpers (bytes, relative time,
 duration) are in [`$lib/format.ts`](../../lib/format.ts), safe on client + server.
 
 ## Notes / TODO

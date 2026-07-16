@@ -176,7 +176,9 @@
 						<Tooltip.Root>
 							<Tooltip.Trigger
 								class="inline-flex w-24 shrink-0 items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium text-muted-foreground"
-								aria-label={`Sync status: ${status.label}`}
+								aria-label={workerAlert
+									? `Sync status: ${status.label}. ${workerAlert}`
+									: `Sync status: ${status.label}`}
 							>
 								<span class="relative flex h-2 w-2 shrink-0">
 									{#if status.ping}
@@ -201,7 +203,11 @@
 								{/if}
 								{@render statusDetail('Updates', connected ? 'live (connected)' : 'reconnecting…')}
 								{#if workerAlert}
-									<span class="mt-1 border-t border-background/20 pt-1 text-amber-300">
+									<!-- Tooltip.Content inverts (bg-foreground): amber-300 reads on the dark
+									     light-theme surface, amber-600 on the light dark-theme surface. -->
+									<span
+										class="mt-1 border-t border-background/20 pt-1 text-amber-300 dark:text-amber-600"
+									>
 										{workerAlert}
 									</span>
 								{/if}
