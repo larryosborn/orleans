@@ -27,7 +27,9 @@ export const GET: RequestHandler = async ({ params, locals, setHeaders }) => {
 	if (!b) throw error(404, 'Stored copy not found');
 
 	if (r2Configured()) {
-		throw redirect(302, await presignBlob(b.key));
+		// The presigned URL is on R2's origin; SvelteKit blocks external redirects
+		// unless explicitly allowed. It's always our own R2 endpoint (see blob.ts).
+		throw redirect(302, await presignBlob(b.key), { external: true });
 	}
 
 	// Local dev fallback: stream the cached file.
