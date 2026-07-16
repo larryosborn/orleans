@@ -33,6 +33,7 @@ import {
 	hostOf,
 	inScope,
 	normalize,
+	normalizeHtml,
 	pageTitle,
 	parseSitemap,
 	parseSitemapEntries,
@@ -191,17 +192,14 @@ async function ingestResponse(resp: Response, ctx: IngestCtx): Promise<string[]>
 		if (mode === 'estimate') {
 			stats.bytesEstimated += size;
 		} else {
-			sha = sha256Hex(text);
-			stats.bytesDownloaded += size;
+			// Hash + store the normalized HTML so re-fetches of an unchanged page
+			// don't produce false `changed` versions or near-duplicate blobs.
+			const normalized = normalizeHtml(text);
+			sha = sha256Hex(normalized);
+			stats.bytesDownloaded += size; // bytes actually fetched (original)
 			if (sha !== prevSha) {
-				blobSha = await ensureBlob(
-					sha,
-					'.html',
-					new TextEncoder().encode(text),
-					ctype,
-					size,
-					stats
-				);
+				const bytes = new TextEncoder().encode(normalized);
+				blobSha = await ensureBlob(sha, '.html', bytes, ctype, bytes.byteLength, stats);
 			}
 		}
 		const resourceId = await recordObservation({

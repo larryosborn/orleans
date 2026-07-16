@@ -76,6 +76,13 @@ size/etag (estimate) to the resource's stored fingerprint → decides
 new/changed/unchanged/probed. Only new/changed/probed/gone/error write a
 `resource_version`; unchanged 304s just bump `last_fetched_at`.
 
+**HTML is normalized before hashing** (`normalizeHtml` in `worker/http.ts`): CivicPlus
+re-renders per-request junk on every load — ASP.NET `__VIEWSTATE`, randomized element
+ids, and a rotating photo carousel — which would otherwise produce endless false
+`changed` versions and near-duplicate blobs. The normalizer strips exactly those
+(content, links, and text are untouched), so an unchanged page hashes identically and
+dedupes. The stored blob is the normalized copy — the tradeoff for R2 dedup.
+
 ---
 
 ## 4. Run modes
@@ -335,8 +342,6 @@ DocumentCenter index is a React SPA, so its folder listing isn't in the page HTM
 
 ## 15. Open items / future work
 
-- **Hash normalization** — CivicPlus embeds per-request tokens, so re-fetches
-  show false `changed`. Strip volatile markup before hashing to quiet the churn.
 - **Case-duplicate URLs** — `normalize()` lowercases the host but not the path, so
   `/AgendaCenter` and `/agendacenter` become two resources for the same content.
   Lowercasing paths would dedupe them (safe for this IIS/CivicPlus target) but is a

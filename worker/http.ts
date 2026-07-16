@@ -105,6 +105,55 @@ export function parseSitemapEntries(xml: string): SitemapEntry[] {
 	return out;
 }
 
+/** Remove the full `<div …>…</div>` block starting at the first match of `openRe`,
+ *  balancing nested divs (which regex can't). Recurses to strip every occurrence. */
+function stripDivBlock(html: string, openRe: RegExp): string {
+	const m = openRe.exec(html);
+	if (!m) return html;
+	const scan = /<div\b|<\/div>/gi;
+	scan.lastIndex = m.index;
+	let depth = 0;
+	let t: RegExpExecArray | null;
+	while ((t = scan.exec(html))) {
+		if (t[0][1] === '/') {
+			if (--depth === 0) {
+				return stripDivBlock(html.slice(0, m.index) + html.slice(scan.lastIndex), openRe);
+			}
+		} else {
+			depth++;
+		}
+	}
+	return html; // unbalanced — leave it
+}
+
+// CivicPlus rotating photo carousel: the whole widget (slides, nav dots, image
+// selection, per-request ids) differs every request. Stable pages don't have it.
+const SLIDESHOW_OPEN = /<div class="widget slideShow\b/i;
+
+/**
+ * Strip per-request volatile bits from CivicPlus/ASP.NET HTML so re-fetches of an
+ * unchanged page hash identically — no false `changed` versions, and identical
+ * pages dedupe to one blob. Only junk is removed (ASP.NET WebForms state tokens,
+ * randomized ids, and the rotating slideshow); visible content/links/text stay.
+ */
+export function normalizeHtml(html: string): string {
+	return (
+		stripDivBlock(html, SLIDESHOW_OPEN)
+			// ASP.NET hidden fields (__VIEWSTATE, __VIEWSTATEGENERATOR, *Token, …): blank the value
+			.replace(
+				/(<input\b[^>]*\bname="(?:__[A-Za-z]+|[^"]*Token[^"]*)"[^>]*\bvalue=")[^"]*(")/gi,
+				'$1$2'
+			)
+			// …and the value-before-name attribute ordering
+			.replace(
+				/(<input\b[^>]*\bvalue=")[^"]*("[^>]*\bname="(?:__[A-Za-z]+|[^"]*Token[^"]*)")/gi,
+				'$1$2'
+			)
+			// CivicPlus per-request random element ids: anch<hex> / row<hex> (id="" or href="#…")
+			.replace(/\b(anch|row)[0-9a-f]{6,}\b/gi, '$1_')
+	);
+}
+
 export function extractLinks(baseUrl: string, html: string): string[] {
 	const out: string[] = [];
 	for (const m of html.matchAll(HREF_RE)) {
