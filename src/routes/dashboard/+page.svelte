@@ -17,6 +17,9 @@
 	// (and while disconnected) we fall back to the server-loaded values.
 	let streamed = $state<typeof data.active | undefined>(undefined);
 	let streamedProgress = $state<typeof data.progress | undefined>(undefined);
+	// New URLs discovered since the last aggregate tick — a nonzero value means the
+	// frontier (and the Overall denominator) is still growing, not converged yet.
+	let recentDelta = $state(0);
 	const active = $derived(streamed !== undefined ? streamed : data.active);
 	const progress = $derived(streamedProgress ?? data.progress);
 	let connected = $state(false);
@@ -53,7 +56,11 @@
 						startedAt: run.startedAt ? new Date(run.startedAt) : null
 					}
 				: null;
-			if (p?.progress) streamedProgress = p.progress;
+			if (p?.progress) {
+				const prev = streamedProgress?.totalResources ?? data.progress.totalResources;
+				recentDelta = Math.max(0, p.progress.totalResources - prev);
+				streamedProgress = p.progress;
+			}
 			// When the active run ends, refresh aggregates (tiles, feed, alert).
 			if (wasActive && !run) invalidateAll();
 		});
@@ -168,6 +175,17 @@
 							overallPct,
 							'resources'
 						)}
+						<p class="text-xs text-muted-foreground">
+							{formatNumber(progress.totalResources)} discovered
+							{#if recentDelta > 0}
+								<span class="text-amber-600 dark:text-amber-500">
+									↑ +{formatNumber(recentDelta)} — still finding new URLs (Overall % settles once page
+									crawling finishes)
+								</span>
+							{:else}
+								· settling
+							{/if}
+						</p>
 					</div>
 
 					{#if active.currentUrl}
