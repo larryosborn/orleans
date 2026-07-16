@@ -122,6 +122,12 @@ bun run worker/sync-blobs.ts --both --dry-run
 Cost-saving workflow: crawl locally (`BLOB_STORE=local`, no R2 usage), then
 `bun run blobs:push` when you want it durable.
 
+**Viewing an archived copy.** The dashboard's content explorer links each stored
+resource to `/dashboard/blob/[id]` (auth-gated). In prod it presigns a short-lived
+R2 GET URL (via `aws4fetch`, portable across Vercel/Cloudflare) and redirects; in
+dev without R2 it streams the file from the local cache. The app reuses the same
+`R2_*` credentials as the worker (see [`src/lib/server/blob.ts`](../src/lib/server/blob.ts)).
+
 ---
 
 ## 6. Migrations (auto-applied — no manual step)
@@ -329,8 +335,6 @@ DocumentCenter index is a React SPA, so its folder listing isn't in the page HTM
 
 ## 15. Open items / future work
 
-- **"View stored copy"** — presign an R2 URL (or serve local blobs) from the
-  content explorer so you can open an archived page/PDF from the dashboard.
 - **Hash normalization** — CivicPlus embeds per-request tokens, so re-fetches
   show false `changed`. Strip volatile markup before hashing to quiet the churn.
 - **Case-duplicate URLs** — `normalize()` lowercases the host but not the path, so

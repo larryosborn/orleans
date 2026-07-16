@@ -70,11 +70,21 @@
 							href={r.url}
 							target="_blank"
 							rel="noreferrer"
-							class="truncate font-mono text-xs text-muted-foreground hover:underline"
+							class="block truncate font-mono text-xs text-muted-foreground hover:underline"
 							title={r.url}
 						>
 							{r.url}
 						</a>
+						{#if r.sha256}
+							<a
+								href={`/dashboard/blob/${r.id}`}
+								target="_blank"
+								rel="noreferrer"
+								class="text-xs text-primary hover:underline"
+							>
+								view archived copy ↗
+							</a>
+						{/if}
 					</Table.Cell>
 					<Table.Cell><Badge variant="outline">{r.kind}</Badge></Table.Cell>
 					<Table.Cell>

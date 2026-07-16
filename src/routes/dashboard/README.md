@@ -14,6 +14,7 @@ page when there's no session). See the
 | `/dashboard/runs`      | `runs/+page.*`                     | Run history table (click a row → detail)                                                                         |
 | `/dashboard/runs/[id]` | `runs/[id]/+page.*`                | Per-run stats, timing, worker id, and full event log                                                             |
 | `/dashboard/content`   | `content/+page.*`                  | Searchable/filterable resource explorer (by URL/title, kind, state) with pagination                              |
+| `/dashboard/blob/[id]` | `blob/[id]/+server.ts`             | View a resource's archived copy — presigned R2 redirect (prod) or local file (dev)                               |
 
 ## Control plane
 

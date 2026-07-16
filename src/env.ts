@@ -75,5 +75,20 @@ export const variables = defineEnvVars({
 		description:
 			'Secret used to sign tokens. For production use 32 characters generated with high entropy. See [Better Auth installation](https://www.better-auth.com/docs/installation).',
 		schema: requiredAtRuntime
+	},
+	// Cloudflare R2 — lets the dashboard presign short-lived URLs to view archived
+	// blobs. Same credentials the worker uses. Optional: without them, the
+	// "view stored copy" endpoint falls back to the local BLOB_DIR (dev only).
+	R2_ENDPOINT: {
+		description: 'R2 S3 endpoint, e.g. https://<acct>.r2.cloudflarestorage.com.',
+		schema: optionalString
+	},
+	R2_BUCKET: { description: 'R2 bucket name holding the archived blobs.', schema: optionalString },
+	R2_ACCESS_KEY_ID: { description: 'R2 API token access key id.', schema: optionalString },
+	R2_SECRET_ACCESS_KEY: { description: 'R2 API token secret access key.', schema: optionalString },
+	BLOB_DIR: {
+		description:
+			'Local blob cache dir for serving archived copies in dev (default `.cache/blobs`).',
+		schema: optionalString
 	}
 });
