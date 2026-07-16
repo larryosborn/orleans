@@ -103,10 +103,42 @@ export async function getRecentRuns(limit = 10) {
 	return db.select().from(syncRun).orderBy(desc(syncRun.requestedAt)).limit(limit);
 }
 
+/** One coverage bucket for a resource `kind` (page / document / sitemap / other):
+ *  how many of that kind have been fetched vs discovered. `kind` is assigned at
+ *  discovery time (independent of fetch), so `total` is a stable denominator — unlike
+ *  `contentType`, which is null until a body is fetched and would make totals drift. */
+export interface SyncProgressBucket {
+	kind: string;
+	label: string;
+	total: number;
+	fetched: number;
+}
+
+// Preferred display order + human labels for the known kinds; unknown kinds sort
+// last and fall back to their raw value as the label. Keeps rendering data-driven
+// (only kinds that exist get a bar) while giving a stable, legible ordering.
+const KIND_LABELS: Record<string, string> = {
+	page: 'Pages',
+	document: 'Documents',
+	sitemap: 'Sitemaps',
+	other: 'Other'
+};
+const KIND_ORDER = ['page', 'document', 'sitemap', 'other'];
+const kindRank = (kind: string) => {
+	const i = KIND_ORDER.indexOf(kind);
+	return i === -1 ? KIND_ORDER.length : i;
+};
+
 export interface SyncProgress {
 	totalResources: number;
 	fetched: number;
 	dueRemaining: number;
+	/** Per-content-type coverage, one entry per resource `kind` present. Empty when
+	 *  nothing has been discovered yet. Zero-total kinds never appear (grouped query). */
+	byType: SyncProgressBucket[];
+	// Core-vs-Documents roll-up, kept for backward derivability. These are crawl
+	// *priority tier* based (core = priority 0, docs = priority >= 2), a different cut
+	// than `byType`'s kind buckets, so the original headline stays reconstructable.
 	coreTotal: number;
 	coreFetched: number;
 	docTotal: number;
@@ -116,8 +148,9 @@ export interface SyncProgress {
 	storedBytes: number;
 }
 
-/** Live archive progress, for the sync status card. Core coverage is the headline
- *  (fetched sitemap pages / total core); `dueRemaining` is the frontier work left. */
+/** Live archive progress, for the sync status card. `fetched / totalResources` is
+ *  the overall roll-up; `byType` breaks coverage down per content type; `dueRemaining`
+ *  is the frontier work left. */
 export async function getSyncProgress(): Promise<SyncProgress> {
 	const now = Date.now();
 	const [r] = await db
@@ -132,6 +165,24 @@ export async function getSyncProgress(): Promise<SyncProgress> {
 			documents: sql<number>`sum(case when ${resource.kind} = 'document' and ${resource.lastFetchedAt} is not null then 1 else 0 end)`
 		})
 		.from(resource);
+	// Per-kind coverage — grouped so only kinds that actually exist produce a bucket
+	// (no divide-by-zero downstream, since total >= 1 for every returned row).
+	const typeRows = await db
+		.select({
+			kind: resource.kind,
+			total: count(),
+			fetched: sql<number>`sum(case when ${resource.lastFetchedAt} is not null then 1 else 0 end)`
+		})
+		.from(resource)
+		.groupBy(resource.kind);
+	const byType: SyncProgressBucket[] = typeRows
+		.map((t) => ({
+			kind: t.kind,
+			label: KIND_LABELS[t.kind] ?? t.kind,
+			total: Number(t.total),
+			fetched: Number(t.fetched)
+		}))
+		.sort((a, b) => kindRank(a.kind) - kindRank(b.kind) || a.kind.localeCompare(b.kind));
 	const [b] = await db
 		.select({ objects: count(), bytes: sql<number>`coalesce(sum(${blob.sizeBytes}), 0)` })
 		.from(blob);
@@ -139,6 +190,7 @@ export async function getSyncProgress(): Promise<SyncProgress> {
 		totalResources: r?.total ?? 0,
 		fetched: Number(r?.fetched ?? 0),
 		dueRemaining: Number(r?.dueRemaining ?? 0),
+		byType,
 		coreTotal: Number(r?.coreTotal ?? 0),
 		coreFetched: Number(r?.coreFetched ?? 0),
 		docTotal: Number(r?.docTotal ?? 0),

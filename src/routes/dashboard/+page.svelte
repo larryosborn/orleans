@@ -27,15 +27,10 @@
 	const progress = $derived(streamedProgress ?? data.progress);
 	let connected = $state(false);
 
-	// Core coverage % (headline), request rate, and ETA for the remaining frontier.
-	const corePct = $derived(
-		progress.coreTotal > 0 ? Math.round((progress.coreFetched / progress.coreTotal) * 100) : 0
-	);
-	// Documents = the long tail. Shown as its own bar (not blended with the ~complete
-	// page count) so it climbs within its own range instead of dragging the % down.
-	const docPct = $derived(
-		progress.docTotal > 0 ? Math.round((progress.docFetched / progress.docTotal) * 100) : 0
-	);
+	// Coverage %, guarded against divide-by-zero (a zero-total bucket reads as 0%).
+	const pctOf = (done: number, total: number) => (total > 0 ? Math.round((done / total) * 100) : 0);
+	// Overall roll-up: everything fetched vs everything discovered (the headline).
+	const overallPct = $derived(pctOf(progress.fetched, progress.totalResources));
 	const ratePerMin = $derived.by(() => {
 		if (!active?.startedAt) return 0;
 		const min = (Date.now() - active.startedAt.getTime()) / 60000;
@@ -251,27 +246,29 @@
 						</span>
 					</div>
 
-					<!-- Coverage: core (the site's pages) + overall (long tail incl. documents) -->
+					<!-- Coverage: overall roll-up + one bar per content type (data-driven) -->
 					<div class="space-y-2">
 						{@render coverageBar(
-							'Core site coverage',
-							progress.coreFetched,
-							progress.coreTotal,
-							corePct,
-							'pages'
+							'Overall',
+							progress.fetched,
+							progress.totalResources,
+							overallPct,
+							'resources'
 						)}
-						{@render coverageBar(
-							'Documents (PDFs)',
-							progress.docFetched,
-							progress.docTotal,
-							docPct,
-							'docs'
-						)}
+						{#each progress.byType as t (t.kind)}
+							{@render coverageBar(
+								t.label,
+								t.fetched,
+								t.total,
+								pctOf(t.fetched, t.total),
+								t.label.toLowerCase()
+							)}
+						{/each}
 						<p class="text-xs text-muted-foreground">
 							{formatNumber(progress.totalResources)} discovered
 							{#if recentDelta > 0}
 								<span class="text-amber-600 dark:text-amber-500">
-									↑ +{formatNumber(recentDelta)} — still finding new URLs (the Documents total keeps growing
+									↑ +{formatNumber(recentDelta)} — still finding new URLs (per-type totals keep growing
 									until page crawling finishes)
 								</span>
 							{:else}
@@ -309,19 +306,21 @@
 					</p>
 					<div class="space-y-2">
 						{@render coverageBar(
-							'Core site coverage',
-							progress.coreFetched,
-							progress.coreTotal,
-							corePct,
-							'pages'
+							'Overall',
+							progress.fetched,
+							progress.totalResources,
+							overallPct,
+							'resources'
 						)}
-						{@render coverageBar(
-							'Documents (PDFs)',
-							progress.docFetched,
-							progress.docTotal,
-							docPct,
-							'docs'
-						)}
+						{#each progress.byType as t (t.kind)}
+							{@render coverageBar(
+								t.label,
+								t.fetched,
+								t.total,
+								pctOf(t.fetched, t.total),
+								t.label.toLowerCase()
+							)}
+						{/each}
 					</div>
 					<p class="text-xs text-muted-foreground">
 						{formatNumber(progress.fetched)} archived · {formatNumber(progress.documents)} documents ·
