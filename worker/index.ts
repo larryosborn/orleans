@@ -7,7 +7,7 @@
 //   bun run worker/index.ts --mode crawl          # enqueue + run once, then exit
 import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { and, asc, desc, eq, inArray, lt } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, lt } from 'drizzle-orm';
 import { client, db } from './db';
 import { syncRun } from '../src/lib/server/db/schema';
 import type { SyncRun } from '../src/lib/server/db/crawl.schema';
@@ -21,6 +21,7 @@ const MAINTENANCE_INTERVAL_MS = 30_000;
 const ACTIVE = ['queued', 'running', 'paused'] as const;
 
 let stopping = false;
+let standby = false;
 process.on(
 	'SIGINT',
 	() => ((stopping = true), console.log('\nshutting down after current job...'))
@@ -39,6 +40,31 @@ async function ensureSchema(): Promise<void> {
 
 /** Atomically claim the oldest queued run; returns it or null. */
 async function claimNext(): Promise<SyncRun | null> {
+	// Single-writer guard. Two workers iterating the same frontier double-process
+	// every resource — duplicate version rows, double blob writes, and 2× request
+	// load on the (politely rate-limited) target site. If another worker already
+	// owns a live run (fresh heartbeat), stand down. This process becomes a warm
+	// standby: it only starts claiming once that worker dies and its run goes
+	// stale (reaped by reapStaleRuns).
+	const [live] = await db
+		.select({ id: syncRun.id, workerId: syncRun.workerId })
+		.from(syncRun)
+		.where(
+			and(
+				inArray(syncRun.status, ['running', 'paused']),
+				gt(syncRun.heartbeatAt, new Date(Date.now() - STALE_RUN_MS))
+			)
+		)
+		.limit(1);
+	if (live) {
+		if (!standby) {
+			console.log(`another worker (${live.workerId}) owns an active run — standing by`);
+			standby = true;
+		}
+		return null;
+	}
+	standby = false;
+
 	const [queued] = await db
 		.select()
 		.from(syncRun)

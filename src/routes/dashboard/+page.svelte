@@ -17,6 +17,8 @@
 	// (and while disconnected) we fall back to the server-loaded values.
 	let streamed = $state<typeof data.active | undefined>(undefined);
 	let streamedProgress = $state<typeof data.progress | undefined>(undefined);
+	let streamedActivity = $state<typeof data.activity | undefined>(undefined);
+	const activity = $derived(streamedActivity ?? data.activity);
 	// New URLs discovered since the last aggregate tick — a nonzero value means the
 	// frontier (and the Overall denominator) is still growing, not converged yet.
 	let recentDelta = $state(0);
@@ -62,6 +64,7 @@
 				recentDelta = Math.max(0, p.progress.totalResources - prev);
 				streamedProgress = p.progress;
 			}
+			if (p?.activity) streamedActivity = p.activity;
 			// When the active run ends, refresh aggregates (tiles, feed, alert).
 			if (wasActive && !run) invalidateAll();
 		});
@@ -83,6 +86,12 @@
 		if (k === 'gone' || k === 'error') return 'destructive';
 		if (k === 'changed') return 'secondary';
 		return 'outline';
+	}
+	function outcomeVariant(o: string): 'default' | 'secondary' | 'destructive' | 'outline' {
+		if (o === 'new') return 'default';
+		if (o === 'gone') return 'destructive';
+		if (o === 'changed') return 'secondary';
+		return 'outline'; // checked (unchanged re-verify)
 	}
 </script>
 
@@ -258,6 +267,40 @@
 				</div>
 			{:else}
 				<p class="text-sm text-muted-foreground">No runs yet. Start one below.</p>
+			{/if}
+		</Card.Content>
+	</Card.Root>
+
+	<!-- Live activity: what the worker is fetching right now ---------------- -->
+	<Card.Root>
+		<Card.Header>
+			<div class="flex items-center justify-between">
+				<Card.Title>Live activity</Card.Title>
+				<span class="text-xs text-muted-foreground">most recently fetched</span>
+			</div>
+		</Card.Header>
+		<Card.Content>
+			{#if activity.length}
+				<ul class="divide-y">
+					{#each activity as a (a.id)}
+						<li class="flex items-center gap-3 py-2 text-sm">
+							<Badge variant={outcomeVariant(a.outcome)} class="w-16 justify-center">
+								{a.outcome}
+							</Badge>
+							<span class="shrink-0 text-xs text-muted-foreground">
+								{a.kind === 'document' ? 'doc' : 'page'}
+							</span>
+							<span class="min-w-0 flex-1 truncate" title={a.url}>
+								{a.title || a.url}
+							</span>
+							<span class="shrink-0 text-xs tabular-nums text-muted-foreground">
+								{formatRelative(a.fetchedAt ? new Date(a.fetchedAt) : null)}
+							</span>
+						</li>
+					{/each}
+				</ul>
+			{:else}
+				<p class="text-sm text-muted-foreground">No fetches yet.</p>
 			{/if}
 		</Card.Content>
 	</Card.Root>

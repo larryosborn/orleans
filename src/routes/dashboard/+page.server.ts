@@ -4,18 +4,29 @@ import type { SyncRun } from '$lib/server/db/crawl.schema';
 import * as sync from '$lib/server/sync';
 
 export const load: PageServerLoad = async () => {
-	const [overview, active, recent, lastRun, events, eventCounts, storage, feed, progress] =
-		await Promise.all([
-			sync.getOverview(),
-			sync.getActiveRun(),
-			sync.getRecentRuns(6),
-			sync.getLastCompletedRun(),
-			sync.getEvents({ limit: 10 }),
-			sync.getEventCounts(),
-			sync.getStorageByType(),
-			sync.getChangeFeed(10),
-			sync.getSyncProgress()
-		]);
+	const [
+		overview,
+		active,
+		recent,
+		lastRun,
+		events,
+		eventCounts,
+		storage,
+		feed,
+		progress,
+		activity
+	] = await Promise.all([
+		sync.getOverview(),
+		sync.getActiveRun(),
+		sync.getRecentRuns(6),
+		sync.getLastCompletedRun(),
+		sync.getEvents({ limit: 10 }),
+		sync.getEventCounts(),
+		sync.getStorageByType(),
+		sync.getChangeFeed(10),
+		sync.getSyncProgress(),
+		sync.getRecentActivity()
+	]);
 
 	// Worker-health hint: a run is queued/running in the DB, but is anything
 	// actually processing it? If nothing has claimed a queued run, or a running
@@ -32,6 +43,7 @@ export const load: PageServerLoad = async () => {
 		storage,
 		feed,
 		progress,
+		activity,
 		workerAlert
 	};
 };
