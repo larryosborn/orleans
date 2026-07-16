@@ -138,7 +138,7 @@
 	}
 </script>
 
-{#snippet coverageBar(label: string, done: number, total: number, pct: number, unit: string)}
+{#snippet coverageBar(label: string, done: number, total: number, pct: number, unit = '')}
 	<div class="space-y-1">
 		<div class="flex justify-between text-xs">
 			<span class="font-medium">{label}</span>
@@ -151,6 +151,22 @@
 			<div class="h-full rounded-full bg-primary transition-all" style="width:{pct}%"></div>
 		</div>
 	</div>
+{/snippet}
+
+<!-- Overall roll-up + one bar per content type (data-driven from progress.byType).
+     Shared by the active-run and idle branches so both stay in lockstep. Per-type
+     bars omit a unit — the label already names the type; only Overall needs one. -->
+{#snippet coverageBars()}
+	{@render coverageBar(
+		'Overall',
+		progress.fetched,
+		progress.totalResources,
+		overallPct,
+		'resources'
+	)}
+	{#each progress.byType as t (t.kind)}
+		{@render coverageBar(t.label, t.fetched, t.total, pctOf(t.fetched, t.total))}
+	{/each}
 {/snippet}
 
 {#snippet statusDetail(label: string, value: string)}
@@ -248,22 +264,7 @@
 
 					<!-- Coverage: overall roll-up + one bar per content type (data-driven) -->
 					<div class="space-y-2">
-						{@render coverageBar(
-							'Overall',
-							progress.fetched,
-							progress.totalResources,
-							overallPct,
-							'resources'
-						)}
-						{#each progress.byType as t (t.kind)}
-							{@render coverageBar(
-								t.label,
-								t.fetched,
-								t.total,
-								pctOf(t.fetched, t.total),
-								t.label.toLowerCase()
-							)}
-						{/each}
+						{@render coverageBars()}
 						<p class="text-xs text-muted-foreground">
 							{formatNumber(progress.totalResources)} discovered
 							{#if recentDelta > 0}
@@ -305,22 +306,7 @@
 						· {formatRelative(data.lastRun.finishedAt)}
 					</p>
 					<div class="space-y-2">
-						{@render coverageBar(
-							'Overall',
-							progress.fetched,
-							progress.totalResources,
-							overallPct,
-							'resources'
-						)}
-						{#each progress.byType as t (t.kind)}
-							{@render coverageBar(
-								t.label,
-								t.fetched,
-								t.total,
-								pctOf(t.fetched, t.total),
-								t.label.toLowerCase()
-							)}
-						{/each}
+						{@render coverageBars()}
 					</div>
 					<p class="text-xs text-muted-foreground">
 						{formatNumber(progress.fetched)} archived · {formatNumber(progress.documents)} documents ·
