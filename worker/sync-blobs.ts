@@ -70,7 +70,7 @@ async function pushHeld(local: Storage, r2: Storage, dryRun: boolean) {
 			.select({ sha256: blob.sha256, key: blob.storageKey, contentType: blob.contentType })
 			.from(blob)
 			.where(isNull(blob.r2SyncedAt))
-	).filter((r) => r.key && !r.key.startsWith('local/'));
+	).filter((r) => r.key && !r.key.startsWith('local/')); // skip legacy placeholder keys
 
 	let copied = 0;
 	let bytes = 0;

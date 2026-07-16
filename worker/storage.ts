@@ -1,11 +1,14 @@
-// Content-addressed blob storage with two interchangeable backends:
+// Content-addressed blob storage over two *layered* backends:
 //
-//   • local  — a filesystem directory (dev/testing; no egress cost)
-//   • r2     — Cloudflare R2 (S3-compatible; remote persistence)
+//   • local  — a filesystem directory (the dev/staging store; no egress cost)
+//   • r2     — Cloudflare R2 (S3-compatible; the canonical durable archive)
 //
-// Objects are keyed by sha256, so content is immutable and identical bytes
-// dedupe to one object. Because keys never change meaning, moving objects
-// between backends is a plain copy-what's-missing — see sync-blobs.ts.
+// They are not interchangeable targets picked by a switch. New bytes always land
+// in local; R2 is written *through* only when publishing is enabled (see
+// makeBlobWriter + the --publish flag). Objects are keyed by sha256, so content
+// is immutable and identical bytes dedupe to one object — and because keys never
+// change meaning, promoting/reconciling is a plain copy-what's-missing (see
+// sync-blobs.ts).
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { S3Client } from 'bun';
