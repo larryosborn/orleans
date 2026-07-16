@@ -31,6 +31,7 @@ function serialize(r: SyncRun) {
 		bytesStored: r.bytesStored,
 		bytesEstimated: r.bytesEstimated,
 		currentUrl: r.currentUrl,
+		requestedAt: r.requestedAt?.getTime() ?? null,
 		heartbeatAt: r.heartbeatAt?.getTime() ?? null,
 		startedAt: r.startedAt?.getTime() ?? null
 	};
@@ -60,17 +61,26 @@ export const GET: RequestHandler = async ({ locals, request }) => {
 			// Reconnection delay hint for EventSource.
 			controller.enqueue(encoder.encode('retry: 3000\n\n'));
 
-			// Aggregate progress is heavier than the run row, so refresh it less often.
+			// Aggregate progress + the activity feed are heavier than the run row, so
+			// refresh them less often. `activity` is only included in the payload on
+			// the ticks it's refreshed; the client keeps its last copy otherwise.
 			let lastAgg = 0;
 			let agg: sync.SyncProgress | null = null;
+			let activity: sync.ActivityItem[] = [];
 			const tick = async () => {
 				try {
 					const active = await sync.getActiveRun();
+					let fresh = false;
 					if (Date.now() - lastAgg >= AGG_MS) {
 						lastAgg = Date.now();
-						agg = await sync.getSyncProgress();
+						fresh = true;
+						[agg, activity] = await Promise.all([sync.getSyncProgress(), sync.getRecentActivity()]);
 					}
-					send('progress', { run: active ? serialize(active) : null, progress: agg });
+					send('progress', {
+						run: active ? serialize(active) : null,
+						progress: agg,
+						activity: fresh ? activity : undefined
+					});
 				} catch {
 					// transient DB error — next tick retries
 				}

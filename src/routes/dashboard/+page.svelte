@@ -17,6 +17,8 @@
 	// (and while disconnected) we fall back to the server-loaded values.
 	let streamed = $state<typeof data.active | undefined>(undefined);
 	let streamedProgress = $state<typeof data.progress | undefined>(undefined);
+	let streamedActivity = $state<typeof data.activity | undefined>(undefined);
+	const activity = $derived(streamedActivity ?? data.activity);
 	// New URLs discovered since the last aggregate tick — a nonzero value means the
 	// frontier (and the Overall denominator) is still growing, not converged yet.
 	let recentDelta = $state(0);
@@ -53,6 +55,7 @@
 			streamed = run
 				? {
 						...run,
+						requestedAt: run.requestedAt ? new Date(run.requestedAt) : null,
 						heartbeatAt: run.heartbeatAt ? new Date(run.heartbeatAt) : null,
 						startedAt: run.startedAt ? new Date(run.startedAt) : null
 					}
@@ -62,12 +65,38 @@
 				recentDelta = Math.max(0, p.progress.totalResources - prev);
 				streamedProgress = p.progress;
 			}
+			if (p?.activity) streamedActivity = p.activity;
 			// When the active run ends, refresh aggregates (tiles, feed, alert).
 			if (wasActive && !run) invalidateAll();
 		});
 		es.onopen = () => (connected = true);
 		es.onerror = () => (connected = false);
 		return () => es.close();
+	});
+
+	// Worker-health hint, derived from the *live* run so it clears the instant a
+	// worker starts heartbeating (a load-time snapshot would linger). Recomputes
+	// each SSE tick, so a stale-heartbeat/unclaimed run surfaces on its own too.
+	const STALE_HEARTBEAT_MS = 30_000;
+	const QUEUE_GRACE_MS = 12_000;
+	const workerAlert = $derived.by(() => {
+		const a = active;
+		if (!a) return null;
+		const now = Date.now();
+		if (a.status === 'queued') {
+			const req = a.requestedAt?.getTime();
+			return req && now - req > QUEUE_GRACE_MS
+				? 'This run is queued but no worker has claimed it. Start the worker with `bun run worker`.'
+				: null;
+		}
+		if (a.status === 'running' || a.status === 'paused') {
+			const beat = a.heartbeatAt?.getTime();
+			if (!beat || now - beat > STALE_HEARTBEAT_MS) {
+				const ago = beat ? `${Math.round((now - beat) / 1000)}s ago` : 'never';
+				return `The worker hasn't sent a heartbeat (last: ${ago}) — it may have stopped. Check that \`bun run worker\` is running.`;
+			}
+		}
+		return null;
 	});
 
 	const maxStorage = $derived(Math.max(1, ...data.storage.map((s) => Number(s.bytes))));
@@ -83,6 +112,12 @@
 		if (k === 'gone' || k === 'error') return 'destructive';
 		if (k === 'changed') return 'secondary';
 		return 'outline';
+	}
+	function outcomeVariant(o: string): 'default' | 'secondary' | 'destructive' | 'outline' {
+		if (o === 'new') return 'default';
+		if (o === 'gone') return 'destructive';
+		if (o === 'changed') return 'secondary';
+		return 'outline'; // checked (unchanged re-verify)
 	}
 </script>
 
@@ -103,7 +138,7 @@
 
 <div class="space-y-6">
 	<!-- Worker-health alert ----------------------------------------------- -->
-	{#if data.workerAlert}
+	{#if workerAlert}
 		<div
 			class="flex items-start gap-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/40 dark:text-amber-200"
 			role="alert"
@@ -111,7 +146,7 @@
 			<span aria-hidden="true">⚠️</span>
 			<div>
 				<p class="font-medium">No worker processing this run</p>
-				<p class="text-amber-800 dark:text-amber-300/90">{data.workerAlert}</p>
+				<p class="text-amber-800 dark:text-amber-300/90">{workerAlert}</p>
 			</div>
 		</div>
 	{/if}
@@ -258,6 +293,40 @@
 				</div>
 			{:else}
 				<p class="text-sm text-muted-foreground">No runs yet. Start one below.</p>
+			{/if}
+		</Card.Content>
+	</Card.Root>
+
+	<!-- Live activity: what the worker is fetching right now ---------------- -->
+	<Card.Root>
+		<Card.Header>
+			<div class="flex items-center justify-between">
+				<Card.Title>Live activity</Card.Title>
+				<span class="text-xs text-muted-foreground">most recently fetched</span>
+			</div>
+		</Card.Header>
+		<Card.Content>
+			{#if activity.length}
+				<ul class="divide-y">
+					{#each activity as a (a.id)}
+						<li class="flex items-center gap-3 py-2 text-sm">
+							<Badge variant={outcomeVariant(a.outcome)} class="w-16 justify-center">
+								{a.outcome}
+							</Badge>
+							<span class="shrink-0 text-xs text-muted-foreground">
+								{a.kind === 'document' ? 'doc' : 'page'}
+							</span>
+							<span class="min-w-0 flex-1 truncate" title={a.url}>
+								{a.title || a.url}
+							</span>
+							<span class="shrink-0 text-xs tabular-nums text-muted-foreground">
+								{formatRelative(a.fetchedAt ? new Date(a.fetchedAt) : null)}
+							</span>
+						</li>
+					{/each}
+				</ul>
+			{:else}
+				<p class="text-sm text-muted-foreground">No fetches yet.</p>
 			{/if}
 		</Card.Content>
 	</Card.Root>

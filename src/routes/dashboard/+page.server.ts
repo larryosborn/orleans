@@ -1,27 +1,35 @@
 import { fail } from '@sveltejs/kit';
 import type { Actions, PageServerLoad } from './$types';
-import type { SyncRun } from '$lib/server/db/crawl.schema';
 import * as sync from '$lib/server/sync';
 
 export const load: PageServerLoad = async () => {
-	const [overview, active, recent, lastRun, events, eventCounts, storage, feed, progress] =
-		await Promise.all([
-			sync.getOverview(),
-			sync.getActiveRun(),
-			sync.getRecentRuns(6),
-			sync.getLastCompletedRun(),
-			sync.getEvents({ limit: 10 }),
-			sync.getEventCounts(),
-			sync.getStorageByType(),
-			sync.getChangeFeed(10),
-			sync.getSyncProgress()
-		]);
+	const [
+		overview,
+		active,
+		recent,
+		lastRun,
+		events,
+		eventCounts,
+		storage,
+		feed,
+		progress,
+		activity
+	] = await Promise.all([
+		sync.getOverview(),
+		sync.getActiveRun(),
+		sync.getRecentRuns(6),
+		sync.getLastCompletedRun(),
+		sync.getEvents({ limit: 10 }),
+		sync.getEventCounts(),
+		sync.getStorageByType(),
+		sync.getChangeFeed(10),
+		sync.getSyncProgress(),
+		sync.getRecentActivity()
+	]);
 
-	// Worker-health hint: a run is queued/running in the DB, but is anything
-	// actually processing it? If nothing has claimed a queued run, or a running
-	// run's heartbeat has gone stale, the worker probably isn't running.
-	const workerAlert = detectWorkerAlert(active);
-
+	// The worker-health hint (is anything actually processing this run?) is derived
+	// on the client from the live run so it clears the moment a worker starts
+	// heartbeating — a load-time snapshot would go stale. See +page.svelte.
 	return {
 		overview,
 		active,
@@ -32,31 +40,9 @@ export const load: PageServerLoad = async () => {
 		storage,
 		feed,
 		progress,
-		workerAlert
+		activity
 	};
 };
-
-const STALE_HEARTBEAT_MS = 30_000;
-const QUEUE_GRACE_MS = 12_000;
-
-function detectWorkerAlert(active: SyncRun | null): string | null {
-	if (!active) return null;
-	const now = Date.now();
-	if (active.status === 'queued') {
-		if (now - active.requestedAt.getTime() > QUEUE_GRACE_MS) {
-			return 'This run is queued but no worker has claimed it. Start the worker with `bun run worker`.';
-		}
-		return null;
-	}
-	if (active.status === 'running' || active.status === 'paused') {
-		const beat = active.heartbeatAt?.getTime();
-		if (!beat || now - beat > STALE_HEARTBEAT_MS) {
-			const ago = beat ? `${Math.round((now - beat) / 1000)}s ago` : 'never';
-			return `The worker hasn't sent a heartbeat (last: ${ago}) — it may have stopped. Check that \`bun run worker\` is running.`;
-		}
-	}
-	return null;
-}
 
 const MODES = ['sync', 'estimate', 'crawl', 'recrawl'] as const;
 const ACTIONS = ['pause', 'resume', 'cancel'] as const;

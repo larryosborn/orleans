@@ -1,7 +1,7 @@
 // Server-side control plane + read models for the sync dashboard. The web app
 // never talks to the worker directly: it enqueues sync_run rows and writes the
 // `control` column; the worker polls, executes, and writes back progress here.
-import { and, count, desc, eq, inArray, like, or, sql } from 'drizzle-orm';
+import { and, count, desc, eq, inArray, isNotNull, like, or, sql } from 'drizzle-orm';
 import { db } from '$lib/server/db';
 import { blob, crawlEvent, link, resource, resourceVersion, syncRun } from '$lib/server/db/schema';
 
@@ -227,6 +227,77 @@ export async function listResources(opts: {
 
 	const [{ total }] = await db.select({ total: count() }).from(resource).where(where);
 	return { rows, total };
+}
+
+export type ActivityOutcome = 'new' | 'changed' | 'gone' | 'checked';
+
+export interface ActivityItem {
+	id: string;
+	url: string;
+	title: string | null;
+	kind: string;
+	sizeBytes: number | null;
+	fetchedAt: number | null;
+	outcome: ActivityOutcome;
+}
+
+// Whether the newest version row was produced by *this* fetch (its observation
+// lands within a few seconds of lastFetchedAt) vs. an older change.
+const VERSION_MATCH_MS = 5000;
+
+/** Live activity: the most-recently *fetched* resources, newest first. Unlike the
+ *  change feed, this includes unchanged re-verifies (every fetch bumps
+ *  `lastFetchedAt`), so it keeps moving even when nothing is changing — that's the
+ *  point: it shows the worker is doing work. Each row's outcome comes from its
+ *  latest version row (new/changed/gone) when that version was written by this same
+ *  fetch; otherwise the fetch confirmed no change → 'checked'. */
+export async function getRecentActivity(limit = 12): Promise<ActivityItem[]> {
+	const lastKind = sql<string | null>`(
+		select ${resourceVersion.changeKind} from ${resourceVersion}
+		where ${resourceVersion.resourceId} = ${resource.id}
+		order by ${resourceVersion.observedAt} desc limit 1
+	)`;
+	const lastVersionAt = sql<number | null>`(
+		select ${resourceVersion.observedAt} from ${resourceVersion}
+		where ${resourceVersion.resourceId} = ${resource.id}
+		order by ${resourceVersion.observedAt} desc limit 1
+	)`;
+	const rows = await db
+		.select({
+			id: resource.id,
+			url: resource.url,
+			title: resource.title,
+			kind: resource.kind,
+			state: resource.state,
+			sizeBytes: resource.sizeBytes,
+			lastFetchedAt: resource.lastFetchedAt,
+			lastKind,
+			lastVersionAt
+		})
+		.from(resource)
+		.where(isNotNull(resource.lastFetchedAt))
+		.orderBy(desc(resource.lastFetchedAt))
+		.limit(limit);
+
+	return rows.map((r) => {
+		const fetchedAt = r.lastFetchedAt?.getTime() ?? null;
+		const versionAt = r.lastVersionAt != null ? Number(r.lastVersionAt) : null;
+		const fromThisFetch =
+			fetchedAt != null && versionAt != null && Math.abs(fetchedAt - versionAt) < VERSION_MATCH_MS;
+		let outcome: ActivityOutcome = 'checked';
+		if (r.state === 'gone') outcome = 'gone';
+		else if (fromThisFetch && (r.lastKind === 'new' || r.lastKind === 'changed'))
+			outcome = r.lastKind;
+		return {
+			id: r.id,
+			url: r.url,
+			title: r.title,
+			kind: r.kind,
+			sizeBytes: r.sizeBytes,
+			fetchedAt,
+			outcome
+		};
+	});
 }
 
 /** Change feed: recent version rows joined to their resource. */
