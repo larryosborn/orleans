@@ -24,6 +24,11 @@
 		"db:generate": "drizzle-kit generate",
 		"db:migrate": "drizzle-kit migrate",
 		"db:studio": "drizzle-kit studio",
+		"worker": "bun run worker/index.ts",
+		"worker:estimate": "bun run worker/index.ts --mode estimate --once",
+		"blobs:sync": "bun run worker/sync-blobs.ts --both",
+		"blobs:push": "bun run worker/sync-blobs.ts --push",
+		"blobs:pull": "bun run worker/sync-blobs.ts --pull",
 		"auth:schema": "better-auth generate --config src/lib/server/auth.ts --output src/lib/server/db/auth.schema.ts --yes"
 	},
 	"devDependencies": {

@@ -15,8 +15,23 @@ let instance: Auth | undefined;
 
 function getAuth(): Auth {
 	if (!instance) {
+		// In dev, derive the origin from the current request so any port works
+		// without an ORIGIN value (each dev server is its own process, so it bakes
+		// its own port). In production, pin it to ORIGIN (safer against host spoofing).
+		const isDev = import.meta.env.DEV;
+		let baseURL: string | undefined = ORIGIN || undefined;
+		if (isDev) {
+			try {
+				baseURL = new URL(getRequestEvent().request.url).origin;
+			} catch {
+				baseURL = undefined; // constructed outside a request; fall back to inference
+			}
+		}
 		instance = betterAuth({
-			baseURL: ORIGIN,
+			baseURL,
+			trustedOrigins: isDev
+				? (request?: Request) => (request ? [new URL(request.url).origin] : [])
+				: undefined,
 			secret: BETTER_AUTH_SECRET,
 			database: drizzleAdapter(db, { provider: 'sqlite' }),
 			emailAndPassword: { enabled: true },

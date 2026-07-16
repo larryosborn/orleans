@@ -32,3 +32,10 @@ storybook-static
 # SQLite
 *.db
 .env*
+
+# Local blob cache (dev/testing store; synced to R2)
+.cache/
+
+# Python bytecode cache
+__pycache__/
+*.pyc

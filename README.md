@@ -1,17 +1,43 @@
-# sv
+# Orleans
 
-Everything you need to build a Svelte project, powered by [`sv`](https://github.com/sveltejs/cli).
+Crawls the Town of Orleans CivicPlus site, **archives** every page and document,
+tracks **what changed and when**, and provides a **dashboard** to observe and
+control the sync.
 
-## Creating a project
+- A standalone **Bun worker** ([`worker/`](worker/)) crawls and writes to **Turso**
+  (metadata + change history) and **content-addressed blob storage** (local cache
+  for dev, **Cloudflare R2** for prod).
+- The **SvelteKit app** reads Turso for a dashboard (`/dashboard`) and steers the
+  worker by writing rows — the two never talk directly.
 
-If you're seeing this, you've probably already done this step. Congrats!
+> **Start here:** [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — the durable
+> reference for the whole system (data model, run modes, storage, deploy).
+
+## Quickstart
 
 ```sh
-# create a new project
-npx sv create my-app
+bun install
+bun run dev            # app + dashboard at http://localhost:5173/dashboard
+
+# crawl into the local cache (no R2 needed), in another shell:
+DATABASE_URL="file:local.db" BLOB_STORE=local \
+  bun run worker/index.ts --mode estimate --max 100 --once
 ```
 
-To recreate this project with the same configuration:
+Local login (seeded mock DB): `admin@example.com` / `password`.
+
+### Subsystem docs
+
+- [`worker/README.md`](worker/README.md) — the sync worker, blob storage, local↔R2 sync
+- [`src/lib/server/db/README.md`](src/lib/server/db/README.md) — schema + auto-migrations
+- [`src/routes/dashboard/README.md`](src/routes/dashboard/README.md) — dashboard + control API
+- [`.env.example`](.env.example) — all environment variables
+
+---
+
+## Project scaffolding
+
+Generated with [`sv`](https://github.com/sveltejs/cli). To recreate this project with the same configuration:
 
 ```sh
 # recreate this project

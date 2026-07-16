@@ -4,6 +4,18 @@
 - **Package Manager**: bun
 - **Add-ons**: prettier, eslint, vitest, playwright, tailwindcss, sveltekit-adapter, drizzle, better-auth, paraglide, storybook, experimental, mcp
 
+## Architecture
+
+This app crawls/archives the Orleans CivicPlus site and tracks changes. **Read
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) first** for the full system: a Bun
+sync worker ([`worker/`](worker/)) writes to Turso (metadata + change history) and
+content-addressed blob storage (local cache / Cloudflare R2); the SvelteKit app
+provides a dashboard (`/dashboard`) and steers the worker via DB rows. Per-area
+docs: [`worker/README.md`](worker/README.md),
+[`src/lib/server/db/README.md`](src/lib/server/db/README.md),
+[`src/routes/dashboard/README.md`](src/routes/dashboard/README.md). Schema changes
+auto-migrate on deploy — never a manual `db:migrate` step.
+
 ---
 
 You are able to use the Svelte MCP server, where you have access to comprehensive Svelte 5 and SvelteKit documentation. Here's how to use the available tools effectively:

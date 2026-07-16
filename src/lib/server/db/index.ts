@@ -2,7 +2,7 @@ import { drizzle, type LibSQLDatabase } from 'drizzle-orm/libsql';
 import { createClient, type Client } from '@libsql/client';
 import { hashPassword } from 'better-auth/crypto';
 import * as schema from './schema';
-import schemaSql from './schema.sql?raw';
+import { runMigrations } from './migrate.web';
 import { DATABASE_URL, DATABASE_AUTH_TOKEN } from '$app/env/private';
 
 // Lazily-created singletons. Nothing here touches the environment or opens a
@@ -43,13 +43,12 @@ export const db = new Proxy({} as LibSQLDatabase<typeof schema>, {
 	has: (_target, prop) => prop in getDb()
 });
 
-// Mock database bootstrap.
+// Database bootstrap, run once per instance on first use (see hooks.server.ts).
 //
-// This app has no persistent database configured — on Vercel the DB lives in
-// the function's writable /tmp dir (set DATABASE_URL=file:/tmp/local.db), which
-// is empty on every cold start. So we create the schema and seed a demo admin
-// user on first use. This is intentionally a throwaway/mock DB; swap in a real
-// hosted libSQL/Turso URL to make it persistent.
+// Applies any pending drizzle migrations (drizzle/*.sql) against the configured
+// database — so schema changes ship with the code and self-apply on deploy, with
+// no manual `db:migrate` step. Then seeds a demo admin the first time (handy for
+// the throwaway /tmp DB on Vercel; a no-op once the user exists).
 const SEED_EMAIL = 'admin@example.com';
 const SEED_PASSWORD = 'password';
 
@@ -62,7 +61,7 @@ export function ensureDb(): Promise<void> {
 
 async function bootstrap(): Promise<void> {
 	const client = getClient();
-	await client.executeMultiple(schemaSql);
+	await runMigrations(client);
 
 	const existing = await client.execute({
 		sql: 'select id from user where email = ? limit 1',
