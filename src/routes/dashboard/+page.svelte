@@ -18,8 +18,8 @@
 	// (and while disconnected) we fall back to the server-loaded values.
 	let streamed = $state<typeof data.active | undefined>(undefined);
 	let streamedProgress = $state<typeof data.progress | undefined>(undefined);
-	let streamedActivity = $state<typeof data.activity | undefined>(undefined);
-	const activity = $derived(streamedActivity ?? data.activity);
+	let streamedProcessing = $state<typeof data.processing | undefined>(undefined);
+	const processing = $derived(streamedProcessing ?? data.processing);
 	// New URLs discovered since the last aggregate tick — a nonzero value means the
 	// frontier (and the Overall denominator) is still growing, not converged yet.
 	let recentDelta = $state(0);
@@ -66,7 +66,7 @@
 				recentDelta = Math.max(0, p.progress.totalResources - prev);
 				streamedProgress = p.progress;
 			}
-			if (p?.activity) streamedActivity = p.activity;
+			if (p?.processing) streamedProcessing = p.processing;
 			// When the active run ends, refresh aggregates (tiles, feed, alert).
 			if (wasActive && !run) invalidateAll();
 		});
@@ -127,17 +127,19 @@
 		if (s === 'completed') return 'secondary';
 		return 'outline';
 	}
+	// Badge colour for a change/outcome/state token: new → primary, gone/error →
+	// destructive, changed → secondary, everything else (probed / active /
+	// unchanged re-verify) → outline. Shared by the change feed and the panel.
 	function changeVariant(k: string): 'default' | 'secondary' | 'destructive' | 'outline' {
 		if (k === 'new') return 'default';
 		if (k === 'gone' || k === 'error') return 'destructive';
 		if (k === 'changed') return 'secondary';
 		return 'outline';
 	}
-	function outcomeVariant(o: string): 'default' | 'secondary' | 'destructive' | 'outline' {
-		if (o === 'new') return 'default';
-		if (o === 'gone') return 'destructive';
-		if (o === 'changed') return 'secondary';
-		return 'outline'; // checked (unchanged re-verify)
+	// Resource type: page / document / other (unknown kinds collapse to "other").
+	const KNOWN_KINDS = new Set(['page', 'document', 'sitemap']);
+	function typeLabel(kind: string): string {
+		return KNOWN_KINDS.has(kind) ? kind : 'other';
 	}
 </script>
 
@@ -333,36 +335,63 @@
 		</Card.Content>
 	</Card.Root>
 
-	<!-- Live activity: what the worker is fetching right now ---------------- -->
+	<!-- Currently processing: the worker's most-recent touches, enriched ---- -->
 	<Card.Root>
 		<Card.Header>
 			<div class="flex items-center justify-between">
-				<Card.Title>Live activity</Card.Title>
+				<Card.Title>Currently processing</Card.Title>
 				<span class="text-xs text-muted-foreground">most recently fetched</span>
 			</div>
 		</Card.Header>
 		<Card.Content>
-			{#if activity.length}
+			{#if processing.records.length}
 				<ul class="divide-y">
-					{#each activity as a (a.id)}
-						<li class="flex items-center gap-3 py-2 text-sm">
-							<Badge variant={outcomeVariant(a.outcome)} class="w-16 justify-center">
-								{a.outcome}
-							</Badge>
-							<span class="shrink-0 text-xs text-muted-foreground">
-								{a.kind === 'document' ? 'doc' : 'page'}
-							</span>
-							<span class="min-w-0 flex-1 truncate" title={a.url}>
-								{a.title || a.url}
-							</span>
-							<span class="shrink-0 text-xs tabular-nums text-muted-foreground">
-								{formatRelative(a.fetchedAt ? new Date(a.fetchedAt) : null)}
-							</span>
+					{#each processing.records as r (r.id)}
+						<li class="flex flex-col gap-1.5 py-3 text-sm">
+							<div class="flex items-center gap-2">
+								<Badge variant="outline" class="shrink-0 capitalize">{typeLabel(r.kind)}</Badge>
+								<span class="min-w-0 flex-1 truncate font-medium" title={r.url}>
+									{r.title || r.url}
+								</span>
+								<span
+									class="shrink-0 text-xs tabular-nums text-muted-foreground"
+									title="cache age — time since last fetched"
+								>
+									fetched {formatRelative(r.fetchedAt)}
+								</span>
+							</div>
+							<div
+								class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground"
+							>
+								{#if r.contentType}
+									<span class="font-mono">{r.contentType}</span>
+								{/if}
+								<span class="flex items-center gap-1">
+									current
+									<Badge variant={changeVariant(r.currentOutcome ?? r.state)}>
+										{r.currentOutcome ?? r.state}
+									</Badge>
+									{#if r.httpStatus}<span class="tabular-nums">{r.httpStatus}</span>{/if}
+								</span>
+								<span class="flex items-center gap-1">
+									previous
+									{#if r.previousOutcome}
+										<Badge variant={changeVariant(r.previousOutcome)}>{r.previousOutcome}</Badge>
+									{:else}
+										<span>—</span>
+									{/if}
+								</span>
+							</div>
 						</li>
 					{/each}
 				</ul>
+				{#if processing.hasMore}
+					<p class="mt-2 text-xs text-muted-foreground">
+						Showing the {processing.records.length} most recent · older records truncated
+					</p>
+				{/if}
 			{:else}
-				<p class="text-sm text-muted-foreground">No fetches yet.</p>
+				<p class="text-sm text-muted-foreground">Nothing processed yet.</p>
 			{/if}
 		</Card.Content>
 	</Card.Root>
