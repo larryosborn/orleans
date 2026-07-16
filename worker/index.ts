@@ -7,15 +7,18 @@
 //   bun run worker/index.ts --mode crawl          # enqueue + run once, then exit
 import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { and, asc, eq } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, lt } from 'drizzle-orm';
 import { client, db } from './db';
 import { syncRun } from '../src/lib/server/db/schema';
 import type { SyncRun } from '../src/lib/server/db/crawl.schema';
 import { applyMigrations } from '../src/lib/server/db/migrator';
+import { SYNC_SCHEDULE_MS, STALE_RUN_MS } from './config';
 import { executeRun, executeSync } from './crawl';
 
 const WORKER_ID = `${process.env.HOSTNAME ?? 'worker'}-${process.pid}-${crypto.randomUUID().slice(0, 8)}`;
 const POLL_INTERVAL_MS = 3000;
+const MAINTENANCE_INTERVAL_MS = 30_000;
+const ACTIVE = ['queued', 'running', 'paused'] as const;
 
 let stopping = false;
 process.on(
@@ -72,9 +75,53 @@ async function runOne(run: SyncRun): Promise<void> {
 	}
 }
 
+/** Mark crashed runs (running/paused, heartbeat gone stale) as failed, so a dead
+ *  worker doesn't leave an active row blocking claims + the schedule. */
+async function reapStaleRuns(): Promise<void> {
+	const reaped = await db
+		.update(syncRun)
+		.set({ status: 'failed', finishedAt: new Date(), error: 'worker heartbeat timed out (reaped)' })
+		.where(
+			and(
+				inArray(syncRun.status, ['running', 'paused']),
+				lt(syncRun.heartbeatAt, new Date(Date.now() - STALE_RUN_MS))
+			)
+		)
+		.returning({ id: syncRun.id });
+	if (reaped.length) console.log(`reaped ${reaped.length} stale run(s)`);
+}
+
+/** Auto-schedule: enqueue a `sync` run when enabled, idle, and one is due. */
+async function maybeScheduleSync(): Promise<void> {
+	if (SYNC_SCHEDULE_MS <= 0) return;
+	const [active] = await db
+		.select({ id: syncRun.id })
+		.from(syncRun)
+		.where(inArray(syncRun.status, [...ACTIVE]))
+		.limit(1);
+	if (active) return; // don't stack runs
+	const [last] = await db
+		.select({ at: syncRun.requestedAt })
+		.from(syncRun)
+		.where(eq(syncRun.mode, 'sync'))
+		.orderBy(desc(syncRun.requestedAt))
+		.limit(1);
+	const dueAt = last ? last.at.getTime() + SYNC_SCHEDULE_MS : 0;
+	if (Date.now() < dueAt) return;
+	await db.insert(syncRun).values({ mode: 'sync', status: 'queued', requestedBy: 'scheduler' });
+	console.log('scheduled sync enqueued');
+}
+
 async function pollLoop(): Promise<void> {
-	console.log(`sync worker ${WORKER_ID} polling (every ${POLL_INTERVAL_MS}ms)`);
+	const sched = SYNC_SCHEDULE_MS > 0 ? `; auto-sync every ${SYNC_SCHEDULE_MS / 60_000}m` : '';
+	console.log(`sync worker ${WORKER_ID} polling (every ${POLL_INTERVAL_MS}ms${sched})`);
+	let lastMaintenance = 0;
 	while (!stopping) {
+		if (Date.now() - lastMaintenance > MAINTENANCE_INTERVAL_MS) {
+			lastMaintenance = Date.now();
+			await reapStaleRuns();
+			await maybeScheduleSync();
+		}
 		const run = await claimNext();
 		if (run) await runOne(run);
 		else await Bun.sleep(POLL_INTERVAL_MS);

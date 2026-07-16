@@ -37,7 +37,13 @@
 					class="cursor-pointer"
 					onclick={() => (window.location.href = `/dashboard/runs/${r.id}`)}
 				>
-					<Table.Cell class="font-medium capitalize">{r.mode}</Table.Cell>
+					<Table.Cell class="font-medium capitalize">
+						{r.mode}
+						{#if r.requestedBy === 'scheduler'}<span
+								class="ml-1 text-xs text-muted-foreground"
+								title="Auto-scheduled">⏱</span
+							>{/if}
+					</Table.Cell>
 					<Table.Cell><Badge variant={statusVariant(r.status)}>{r.status}</Badge></Table.Cell>
 					<Table.Cell class="text-right tabular-nums">{formatNumber(r.pages)}</Table.Cell>
 					<Table.Cell class="text-right tabular-nums">{formatNumber(r.documents)}</Table.Cell>

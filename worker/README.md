@@ -59,6 +59,9 @@ recorded as `probed` (size/etag, no blob); `0` = skip all documents (pages-only)
 # Long-running poll loop (production shape): claims queued runs from the dashboard
 bun run worker
 
+# ...with auto-sync every hour (idle worker enqueues a `sync` run on a schedule)
+SYNC_SCHEDULE_MINUTES=60 bun run worker
+
 # One-shot (ops/testing) — enqueues + runs a single job, then exits
 bun run worker/index.ts --mode estimate --max 80 --once
 bun run worker/index.ts --mode crawl --once
