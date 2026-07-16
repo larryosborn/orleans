@@ -1,8 +1,56 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 ## Project Configuration
 
-- **Language**: TypeScript
-- **Package Manager**: bun
-- **Add-ons**: prettier, eslint, vitest, playwright, tailwindcss, sveltekit-adapter, drizzle, better-auth, paraglide, storybook, experimental, mcp
+- **Language**: TypeScript. **Package manager**: bun — run scripts with `bun run <script>`.
+- **Stack**: SvelteKit (Svelte 5), Drizzle + Turso (libSQL), better-auth, Tailwind, Paraglide (i18n), Storybook, Vitest, Playwright. The `worker/` is a standalone Bun process (no separate `package.json` — run via root scripts).
+
+## Commands
+
+```sh
+bun install
+bun run dev              # app + dashboard at http://localhost:5173/dashboard
+bun run build            # production build   ·   bun run preview to serve it
+bun run check            # svelte-check typecheck (run this, not tsc)
+bun run lint             # prettier --check + eslint   ·   bun run format to fix
+```
+
+**Tests** — Vitest is split into `--project` groups (`client` = Svelte in a browser, `server` = node, plus a Storybook project):
+
+```sh
+bun run test:unit                              # watch mode
+bun run test:unit -- --run                     # single pass (CI-style)
+bun run test:unit -- --run src/foo.test.ts     # one file
+bun run test:unit -- --run -t "some name"      # filter by test name
+bun run test:unit -- --project server          # one project only
+bun run test:e2e                               # Playwright e2e
+bun run test                                   # full suite (unit --run + e2e)
+```
+
+**Database** — Drizzle Kit. Schema auto-migrates on deploy; there is **no manual `db:migrate` step**.
+
+```sh
+bun run db:push          # push schema to the dev DB   ·   db:studio to browse
+bun run auth:schema      # regenerate auth tables after editing src/lib/server/auth.ts
+```
+
+**Worker & blobs** — the crawler and content-addressed blob store:
+
+```sh
+bun run worker           # run the sync worker   ·   worker:estimate for a dry count
+# local crawl, no R2 needed:
+DATABASE_URL="file:local.db" BLOB_STORE=local bun run worker/index.ts --mode estimate --max 100 --once
+bun run blobs:sync       # reconcile local cache ↔ R2 (blobs:push / blobs:pull for one direction)
+```
+
+Local dev login (seeded mock DB): `admin@example.com` / `password`. Copy `.env.example` → `.env` for the full variable set.
+
+## Conventions
+
+- **Commits auto-format.** A husky pre-commit hook runs `lint-staged` (prettier + `eslint --fix`) on staged files, so a commit will reformat/restage them — expected, not a mistake.
+- **The app and worker never talk directly** — they coordinate only through Turso rows. Keep it that way.
 
 ## Architecture
 
