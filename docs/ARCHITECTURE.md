@@ -202,6 +202,7 @@ Full list in [`.env.example`](../.env.example).
 | `CRAWLER_SEEDS`                                                           | worker       | Comma-separated paths/URLs to override the default seeds.          |
 | `CRAWLER_TTL_{CORE,PAGE,AGENDA,DOC}_DAYS`                                 | worker       | `sync` per-tier freshness TTLs (default 7/7/30/180). See §11.      |
 | `CRAWLER_SYNC_BATCH` / `CRAWLER_ERROR_BACKOFF_HOURS`                      | worker       | `sync` claim batch size / failed-URL re-schedule delay.            |
+| `SYNC_SCHEDULE_MINUTES` / `WORKER_STALE_MINUTES`                          | worker       | Auto-enqueue `sync` this often (0=off); reap crashed runs. §11.    |
 
 ---
 
@@ -264,8 +265,13 @@ This gives all four properties at once:
 TTLs are env-tunable per tier (`CRAWLER_TTL_CORE_DAYS`, `_PAGE_`, `_AGENDA_`,
 `_DOC_`; defaults 7/7/30/180); `CRAWLER_SYNC_BATCH` sizes the claim query;
 `CRAWLER_ERROR_BACKOFF_HOURS` re-schedules a failed URL. The BFS `crawl`/`recrawl`
-modes remain for one-shot use. Pair `sync` with a cron (the `schedule` skill) to
-run it automatically.
+modes remain for one-shot use.
+
+**Auto-schedule.** Set `SYNC_SCHEDULE_MINUTES` and an idle worker enqueues a `sync`
+run that often (no external cron — the worker is the always-on component). It skips
+when a run is already active, so runs never stack. It also **reaps stale runs**: a
+`running`/`paused` row whose heartbeat is older than `WORKER_STALE_MINUTES` (default 5) is marked failed, so a crashed worker doesn't block claims or the schedule.
+Scheduler-triggered runs are tagged `requested_by = 'scheduler'` (⏱ in the dashboard).
 
 ---
 
@@ -323,8 +329,6 @@ DocumentCenter index is a React SPA, so its folder listing isn't in the page HTM
 
 ## 15. Open items / future work
 
-- **Scheduling** — wire a cron (the `schedule` skill) to run `sync` automatically
-  (e.g. hourly); it no-ops when nothing is due.
 - **"View stored copy"** — presign an R2 URL (or serve local blobs) from the
   content explorer so you can open an archived page/PDF from the dashboard.
 - **Hash normalization** — CivicPlus embeds per-request tokens, so re-fetches

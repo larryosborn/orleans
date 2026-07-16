@@ -105,3 +105,11 @@ export function ttlFor(priority: number): number {
 export const SYNC_BATCH = Number(process.env.CRAWLER_SYNC_BATCH ?? 200);
 export const SYNC_ERROR_BACKOFF_MS =
 	Number(process.env.CRAWLER_ERROR_BACKOFF_HOURS ?? 6) * 3_600_000;
+
+// Auto-schedule: when > 0, an idle worker enqueues a `sync` run this often.
+// 0 / unset = disabled (only manual/dashboard runs). See worker/index.ts.
+export const SYNC_SCHEDULE_MS = Number(process.env.SYNC_SCHEDULE_MINUTES ?? 0) * 60_000;
+
+// A run whose heartbeat is older than this is considered dead and reaped, so a
+// crashed worker doesn't leave a `running` row blocking the schedule forever.
+export const STALE_RUN_MS = Number(process.env.WORKER_STALE_MINUTES ?? 5) * 60_000;
