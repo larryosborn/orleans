@@ -95,5 +95,8 @@
 	"lint-staged": {
 		"*.{js,ts,svelte,json,css,md,html}": "prettier --write --ignore-unknown",
 		"*.{js,ts,svelte}": "eslint --fix"
+	},
+	"dependencies": {
+		"aws4fetch": "^1.0.20"
 	}
 }

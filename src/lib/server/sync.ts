@@ -168,6 +168,7 @@ export async function listResources(opts: {
 			state: resource.state,
 			contentType: resource.contentType,
 			sizeBytes: resource.sizeBytes,
+			sha256: resource.sha256,
 			httpStatus: resource.httpStatus,
 			lastFetchedAt: resource.lastFetchedAt,
 			lastChangedAt: resource.lastChangedAt
