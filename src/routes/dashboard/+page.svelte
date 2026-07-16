@@ -55,6 +55,7 @@
 			streamed = run
 				? {
 						...run,
+						requestedAt: run.requestedAt ? new Date(run.requestedAt) : null,
 						heartbeatAt: run.heartbeatAt ? new Date(run.heartbeatAt) : null,
 						startedAt: run.startedAt ? new Date(run.startedAt) : null
 					}
@@ -71,6 +72,31 @@
 		es.onopen = () => (connected = true);
 		es.onerror = () => (connected = false);
 		return () => es.close();
+	});
+
+	// Worker-health hint, derived from the *live* run so it clears the instant a
+	// worker starts heartbeating (a load-time snapshot would linger). Recomputes
+	// each SSE tick, so a stale-heartbeat/unclaimed run surfaces on its own too.
+	const STALE_HEARTBEAT_MS = 30_000;
+	const QUEUE_GRACE_MS = 12_000;
+	const workerAlert = $derived.by(() => {
+		const a = active;
+		if (!a) return null;
+		const now = Date.now();
+		if (a.status === 'queued') {
+			const req = a.requestedAt?.getTime();
+			return req && now - req > QUEUE_GRACE_MS
+				? 'This run is queued but no worker has claimed it. Start the worker with `bun run worker`.'
+				: null;
+		}
+		if (a.status === 'running' || a.status === 'paused') {
+			const beat = a.heartbeatAt?.getTime();
+			if (!beat || now - beat > STALE_HEARTBEAT_MS) {
+				const ago = beat ? `${Math.round((now - beat) / 1000)}s ago` : 'never';
+				return `The worker hasn't sent a heartbeat (last: ${ago}) — it may have stopped. Check that \`bun run worker\` is running.`;
+			}
+		}
+		return null;
 	});
 
 	const maxStorage = $derived(Math.max(1, ...data.storage.map((s) => Number(s.bytes))));
@@ -112,7 +138,7 @@
 
 <div class="space-y-6">
 	<!-- Worker-health alert ----------------------------------------------- -->
-	{#if data.workerAlert}
+	{#if workerAlert}
 		<div
 			class="flex items-start gap-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/40 dark:text-amber-200"
 			role="alert"
@@ -120,7 +146,7 @@
 			<span aria-hidden="true">⚠️</span>
 			<div>
 				<p class="font-medium">No worker processing this run</p>
-				<p class="text-amber-800 dark:text-amber-300/90">{data.workerAlert}</p>
+				<p class="text-amber-800 dark:text-amber-300/90">{workerAlert}</p>
 			</div>
 		</div>
 	{/if}
