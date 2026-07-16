@@ -3,6 +3,7 @@
 	import * as Card from '$lib/components/ui/card/index.js';
 	import { Badge } from '$lib/components/ui/badge/index.js';
 	import { Button } from '$lib/components/ui/button/index.js';
+	import * as Tooltip from '$lib/components/ui/tooltip/index.js';
 	import { onMount } from 'svelte';
 	import { invalidateAll } from '$app/navigation';
 	import { formatBytes, formatNumber, formatRelative, formatDuration } from '$lib/format';
@@ -99,6 +100,25 @@
 		return null;
 	});
 
+	// The heartbeat, worker health, and connection signals collapse into a single
+	// fixed-width status chip (live / paused / stale / idle) in the card header.
+	// `stale` folds in the former worker-health banner (stale heartbeat OR a queued
+	// run no worker has claimed) so awareness isn't lost — see the tooltip.
+	type StatusKind = 'live' | 'paused' | 'stale' | 'idle';
+	const statusKind = $derived.by<StatusKind>(() => {
+		if (!active) return 'idle';
+		if (workerAlert) return 'stale';
+		if (active.status === 'paused') return 'paused';
+		return 'live';
+	});
+	const STATUS: Record<StatusKind, { label: string; dot: string; ping: boolean }> = {
+		live: { label: 'live', dot: 'bg-green-500', ping: true },
+		paused: { label: 'paused', dot: 'bg-amber-500', ping: false },
+		stale: { label: 'stale', dot: 'bg-red-500', ping: true },
+		idle: { label: 'idle', dot: 'bg-muted-foreground/50', ping: false }
+	};
+	const status = $derived(STATUS[statusKind]);
+
 	const maxStorage = $derived(Math.max(1, ...data.storage.map((s) => Number(s.bytes))));
 
 	function statusVariant(s: string): 'default' | 'secondary' | 'destructive' | 'outline' {
@@ -136,45 +156,75 @@
 	</div>
 {/snippet}
 
-<div class="space-y-6">
-	<!-- Worker-health alert ----------------------------------------------- -->
-	{#if workerAlert}
-		<div
-			class="flex items-start gap-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/40 dark:text-amber-200"
-			role="alert"
-		>
-			<span aria-hidden="true">⚠️</span>
-			<div>
-				<p class="font-medium">No worker processing this run</p>
-				<p class="text-amber-800 dark:text-amber-300/90">{workerAlert}</p>
-			</div>
-		</div>
-	{/if}
+{#snippet statusDetail(label: string, value: string)}
+	<span class="flex justify-between gap-4">
+		<span class="text-background/60">{label}</span>
+		<span class="font-medium tabular-nums">{value}</span>
+	</span>
+{/snippet}
 
+<div class="space-y-6">
 	<!-- Current status ---------------------------------------------------- -->
 	<Card.Root>
 		<Card.Header>
-			<div class="flex items-center justify-between">
+			<div class="flex flex-wrap items-center justify-between gap-2">
 				<Card.Title>Sync status</Card.Title>
 				<div class="flex items-center gap-2">
-					{#if connected}
-						<span
-							class="flex items-center gap-1 text-xs text-muted-foreground"
-							title="Live updates"
-						>
-							<span class="relative flex h-2 w-2">
-								<span
-									class="absolute inline-flex h-full w-full animate-ping rounded-full bg-green-400 opacity-75"
-								></span>
-								<span class="relative inline-flex h-2 w-2 rounded-full bg-green-500"></span>
-							</span>
-							live
-						</span>
-					{/if}
+					<!-- One fixed-width status chip: never reflows across live/paused/stale/idle.
+					     Hover/focus reveals worker id, phase, heartbeat age, and connection state. -->
+					<Tooltip.Provider delayDuration={100}>
+						<Tooltip.Root>
+							<Tooltip.Trigger
+								class="inline-flex w-24 shrink-0 items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium text-muted-foreground"
+								aria-label={`Sync status: ${status.label}`}
+							>
+								<span class="relative flex h-2 w-2 shrink-0">
+									{#if status.ping}
+										<span
+											class={`absolute inline-flex h-full w-full animate-ping rounded-full opacity-75 ${status.dot}`}
+										></span>
+									{/if}
+									<span class={`relative inline-flex h-2 w-2 rounded-full ${status.dot}`}></span>
+								</span>
+								<span class="capitalize">{status.label}</span>
+							</Tooltip.Trigger>
+							<Tooltip.Content class="flex min-w-44 flex-col items-stretch gap-1 text-left">
+								{#if active}
+									{@render statusDetail('Worker', active.workerId ?? 'unassigned')}
+									{@render statusDetail('Phase', active.currentPhase ?? '—')}
+									{@render statusDetail(
+										'Heartbeat',
+										active.heartbeatAt ? formatRelative(active.heartbeatAt) : 'never'
+									)}
+								{:else}
+									<span class="font-medium">No active run</span>
+								{/if}
+								{@render statusDetail('Updates', connected ? 'live (connected)' : 'reconnecting…')}
+								{#if workerAlert}
+									<span class="mt-1 border-t border-background/20 pt-1 text-amber-300">
+										{workerAlert}
+									</span>
+								{/if}
+							</Tooltip.Content>
+						</Tooltip.Root>
+					</Tooltip.Provider>
+
 					{#if active}
-						<Badge variant={statusVariant(active.status)}>{active.status}</Badge>
-					{:else}
-						<Badge variant="outline">idle</Badge>
+						<form method="POST" action="?/control" use:enhance>
+							<input type="hidden" name="runId" value={active.id} />
+							{#if active.status === 'paused'}
+								<input type="hidden" name="action" value="resume" />
+								<Button type="submit" variant="outline" size="sm" class="w-20">Resume</Button>
+							{:else}
+								<input type="hidden" name="action" value="pause" />
+								<Button type="submit" variant="outline" size="sm" class="w-20">Pause</Button>
+							{/if}
+						</form>
+						<form method="POST" action="?/control" use:enhance>
+							<input type="hidden" name="runId" value={active.id} />
+							<input type="hidden" name="action" value="cancel" />
+							<Button type="submit" variant="destructive" size="sm">Cancel</Button>
+						</form>
 					{/if}
 				</div>
 			</div>
@@ -188,8 +238,6 @@
 							{formatNumber(active.requestsMade)} requests
 							{#if active.maxPages}/ {formatNumber(active.maxPages)} cap{/if}
 						</span>
-						<span class="text-muted-foreground">heartbeat {formatRelative(active.heartbeatAt)}</span
-						>
 						<span class="text-muted-foreground">
 							running {formatDuration(active.startedAt?.getTime())}
 						</span>
@@ -242,24 +290,6 @@
 						{@render stat('eta', etaText ?? '—')}
 						{@render stat('changed', formatNumber(active.newCount + active.changedCount))}
 						{@render stat('errors', formatNumber(active.errorCount))}
-					</div>
-
-					<div class="flex gap-2 pt-1">
-						<form method="POST" action="?/control" use:enhance>
-							<input type="hidden" name="runId" value={active.id} />
-							{#if active.status === 'paused'}
-								<input type="hidden" name="action" value="resume" />
-								<Button type="submit" variant="outline" size="sm">Resume</Button>
-							{:else}
-								<input type="hidden" name="action" value="pause" />
-								<Button type="submit" variant="outline" size="sm">Pause</Button>
-							{/if}
-						</form>
-						<form method="POST" action="?/control" use:enhance>
-							<input type="hidden" name="runId" value={active.id} />
-							<input type="hidden" name="action" value="cancel" />
-							<Button type="submit" variant="destructive" size="sm">Cancel</Button>
-						</form>
 					</div>
 				</div>
 			{:else if data.lastRun}

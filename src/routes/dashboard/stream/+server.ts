@@ -31,6 +31,8 @@ function serialize(r: SyncRun) {
 		bytesStored: r.bytesStored,
 		bytesEstimated: r.bytesEstimated,
 		currentUrl: r.currentUrl,
+		currentPhase: r.currentPhase,
+		workerId: r.workerId,
 		requestedAt: r.requestedAt?.getTime() ?? null,
 		heartbeatAt: r.heartbeatAt?.getTime() ?? null,
 		startedAt: r.startedAt?.getTime() ?? null
