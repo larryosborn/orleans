@@ -158,20 +158,18 @@ export function makeBlobWriter(opts: { publish: boolean }): BlobWriter {
 			'--publish requires R2_* env vars (R2_ENDPOINT / R2_BUCKET / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY).'
 		);
 	}
-	// Local backend is never touched in publish mode (no fs dependency there).
-	const local = r2 ? null : makeLocalStorage(localDir());
+	// Exactly one backend for this run: R2 when publishing, else local. The local
+	// backend is never even constructed in publish mode (no fs dependency there).
+	const backend: Storage = r2 ?? makeLocalStorage(localDir());
 	return {
 		publish: opts.publish,
 		label: r2
 			? `R2-only → ${r2.label} (publishing; no local copy)`
-			: `${local!.label} — local-only (unpublished; pass --publish to write to R2)`,
+			: `${backend.label} — local-only (unpublished; pass --publish to write to R2)`,
 		async putIfAbsent(sha256, ext, bytes, contentType) {
-			if (r2) {
-				const key = await r2.putIfAbsent(sha256, ext, bytes, contentType);
-				return { key, r2Synced: true };
-			}
-			const key = await local!.putIfAbsent(sha256, ext, bytes, contentType);
-			return { key, r2Synced: false };
+			const key = await backend.putIfAbsent(sha256, ext, bytes, contentType);
+			// r2Synced iff the (sole) backend is R2 and the write succeeded.
+			return { key, r2Synced: r2 !== null };
 		},
 		async ensurePublished(key, bytes, contentType) {
 			if (!r2) return false;
