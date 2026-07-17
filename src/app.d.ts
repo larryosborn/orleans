@@ -8,8 +8,10 @@ declare global {
 			user?: User;
 			session?: Session;
 			/** Per-request correlation id, set in hooks.server.ts and bound onto the
-			 *  request logger; available to downstream loads/actions for correlation. */
-			requestId: string;
+			 *  request logger; available to downstream loads/actions for correlation.
+			 *  Optional: handleError may fire for a failure that precedes the request
+			 *  hook, so downstream readers must tolerate it being unset. */
+			requestId?: string;
 		}
 
 		// interface Error {}

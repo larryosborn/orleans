@@ -2,7 +2,7 @@ import { fail, redirect } from '@sveltejs/kit';
 import type { Actions, PageServerLoad } from './$types';
 import { answer } from '$lib/server/rag/answer';
 import type { AskResult } from '$lib/chat';
-import { logger } from '$lib/server/log';
+import { appLogger } from '$lib/server/app-log';
 
 // Gate /ask behind an authenticated session — same guard the dashboard uses
 // (src/routes/dashboard/+layout.server.ts). Unauthenticated visitors are bounced
@@ -20,7 +20,7 @@ export const actions: Actions = {
 	// a streaming variant (a +server.ts endpoint) can be added later without
 	// changing the UI's turn model.
 	ask: async ({ request, locals }) => {
-		const log = logger('app:ask').child({ requestId: locals.requestId });
+		const log = appLogger('ask', locals.requestId);
 		if (!locals.user) return fail(401, { error: 'Not authenticated' });
 
 		const data = await request.formData();

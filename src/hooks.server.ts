@@ -6,17 +6,14 @@ import { svelteKitHandler } from 'better-auth/svelte-kit';
 import type { Handle, HandleServerError } from '@sveltejs/kit';
 import { getTextDirection } from '$lib/paraglide/runtime';
 import { paraglideMiddleware } from '$lib/paraglide/server';
-import { logger } from '$lib/server/log';
-
-// One request logger for the whole app. Per-request correlation (the request id)
-// is bound as a `.child(...)` inside the hook, mirroring how the worker binds its
-// per-run correlation (see worker/log.ts) rather than passing fields per call.
-const requestLog = logger('app:request');
+import { appLogger } from '$lib/server/app-log';
 
 // Outermost hook: tag every request with an id, then log it exactly once when the
 // response is ready — method/path/status/duration, at a level chosen by status
 // class. Sits first in the sequence so it wraps the full handling (auth, i18n,
-// route) and reports the real final status and total duration.
+// route) and reports the real final status and total duration. Per-request
+// correlation (the request id) is bound via appLogger, mirroring how the worker
+// binds its per-run correlation (see worker/log.ts) rather than passing it per call.
 const handleRequestLogging: Handle = async ({ event, resolve }) => {
 	const requestId = crypto.randomUUID();
 	event.locals.requestId = requestId;
@@ -28,7 +25,7 @@ const handleRequestLogging: Handle = async ({ event, resolve }) => {
 	const method = event.request.method;
 	const path = event.url.pathname;
 	const status = response.status;
-	const log = requestLog.child({ requestId });
+	const log = appLogger('request', requestId);
 	const fields = { method, path, status, duration };
 	const msg = `${method} ${path} ${status} ${duration}ms`;
 
@@ -78,7 +75,8 @@ export const handle: Handle = sequence(handleRequestLogging, handleParaglide, ha
 // error stream to genuine, actionable faults.
 export const handleError: HandleServerError = ({ error, event, status, message }) => {
 	if (status < 500) return;
-	logger('app:error')
-		.child({ requestId: event.locals.requestId })
-		.error({ err: error, status, method: event.request.method, path: event.url.pathname }, message);
+	appLogger('error', event.locals.requestId).error(
+		{ err: error, status, method: event.request.method, path: event.url.pathname },
+		message
+	);
 };
