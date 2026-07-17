@@ -6,6 +6,9 @@
 import { eq, lt } from 'drizzle-orm';
 import { db } from './db';
 import { worker } from '../src/lib/server/db/schema';
+import { logger } from '../src/lib/server/log';
+
+const log = logger('registry');
 
 export type WorkerRole = 'active' | 'standby';
 
@@ -40,7 +43,8 @@ export async function upsertWorker(
 			})
 			.onConflictDoUpdate({ target: worker.id, set: { role, runId, phase, lastSeenAt: now } });
 	} catch (e) {
-		console.error('worker registry upsert failed:', e instanceof Error ? e.message : e);
+		// Best-effort: a registry write must never disturb an in-flight run.
+		log.warn({ err: e, workerId: identity.id, role }, 'worker registry upsert failed');
 	}
 }
 
@@ -69,7 +73,11 @@ export async function sweepStaleWorkers(olderThanMs: number): Promise<void> {
 		.delete(worker)
 		.where(lt(worker.lastSeenAt, new Date(Date.now() - olderThanMs)))
 		.returning({ id: worker.id });
-	if (swept.length) console.log(`swept ${swept.length} stale worker registration(s)`);
+	if (swept.length)
+		log.warn(
+			{ swept: swept.map((w) => w.id) },
+			`swept ${swept.length} stale worker registration(s)`
+		);
 }
 
 /** Best-effort self-removal so a graceful shutdown leaves the live set promptly

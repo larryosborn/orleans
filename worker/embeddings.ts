@@ -13,6 +13,9 @@
 // column width, so the store never has to care which produced a given vector.
 import { CLOUDFLARE_EMBED_MODEL, EMBEDDING_PROVIDER, OPENAI_EMBED_MODEL } from './config';
 import { EMBED_DIM } from '../src/lib/server/db/crawl.schema';
+import { logger } from '../src/lib/server/log';
+
+const log = logger('embed');
 
 export interface Embedder {
 	/** Provenance id stored on each chunk (e.g. `cloudflare:@cf/baai/bge-base-en-v1.5`). */
@@ -176,9 +179,9 @@ export function selectEmbedder(override?: Embedder): Embedder {
 	}
 	if (process.env.OPENAI_API_KEY) return makeOpenAIEmbedder();
 
-	console.warn(
-		'⚠ no embedding credentials found — using the deterministic fake embedder. ' +
-			'Set EMBEDDING_PROVIDER=cloudflare|openai (+ credentials) for real embeddings.'
+	log.warn(
+		'no embedding credentials found — using the deterministic fake embedder; ' +
+			'set EMBEDDING_PROVIDER=cloudflare|openai (+ credentials) for real embeddings'
 	);
 	return makeFakeEmbedder();
 }

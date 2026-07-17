@@ -17,6 +17,9 @@ import { eq, isNull } from 'drizzle-orm';
 import { db } from './db';
 import { blob } from '../src/lib/server/db/schema';
 import { makeLocalStorage, makeR2Storage, localDir, type Storage } from './storage';
+import { logger } from '../src/lib/server/log';
+
+const log = logger('sync-blobs');
 
 function human(n: number): string {
 	const u = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -54,9 +57,17 @@ async function copyMissing(
 		copied++;
 		bytes += data.byteLength;
 	}
-	console.log(
-		`${dir.name}: ${dryRun ? 'would copy' : 'copied'} ${copied} object(s), ${human(bytes)}` +
-			(missingSrc ? ` — ${missingSrc} missing at source (${dir.src.kind})` : '')
+	log.info(
+		{
+			direction: dir.name,
+			dryRun,
+			copied,
+			bytes,
+			human: human(bytes),
+			missingSrc,
+			source: dir.src.kind
+		},
+		`${dir.name}: ${dryRun ? 'would copy' : 'copied'} ${copied} object(s), ${human(bytes)}`
 	);
 	return { copied, bytes, missingSrc };
 }
@@ -97,10 +108,18 @@ async function pushHeld(local: Storage, r2: Storage, dryRun: boolean) {
 		stamped++;
 		bytes += data.byteLength;
 	}
-	console.log(
+	log.info(
+		{
+			held: held.length,
+			dryRun,
+			promoted: copied,
+			bytes,
+			human: human(bytes),
+			stamped,
+			missingSrc
+		},
 		`push (local→R2): ${held.length} held · ${dryRun ? 'would promote' : 'promoted'} ${copied} ` +
-			`object(s), ${human(bytes)}${dryRun ? '' : ` · stamped ${stamped}`}` +
-			(missingSrc ? ` — ${missingSrc} missing at source (local)` : '')
+			`object(s), ${human(bytes)}${dryRun ? '' : ` · stamped ${stamped}`}`
 	);
 	return { copied, bytes, stamped, missingSrc };
 }
@@ -115,7 +134,7 @@ const doPull =
 const local = makeLocalStorage(localDir());
 const r2 = makeR2Storage();
 if (!r2) {
-	console.error(
+	log.error(
 		'R2 is not configured — set R2_ENDPOINT / R2_BUCKET / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY.'
 	);
 	process.exit(1);
@@ -127,7 +146,8 @@ const rows = (
 	(r) => r.key && !r.key.startsWith('local/') // ignore legacy placeholder keys
 ) as { key: string; contentType: string | null }[];
 
-console.log(
+log.info(
+	{ blobs: rows.length, local: local.label, remote: r2.label, dryRun },
 	`manifest: ${rows.length} blob(s) · local=${local.label} · remote=${r2.label}${dryRun ? ' · DRY RUN' : ''}`
 );
 

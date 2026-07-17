@@ -23,6 +23,7 @@ import { executeRun, executeSync } from './crawl';
 import { executeExtract } from './extract';
 import { executeEmbed } from './embed';
 import { deregisterWorker, sweepStaleWorkers, upsertWorker, type WorkerIdentity } from './registry';
+import { logger } from '../src/lib/server/log';
 
 const WORKER_HOST = process.env.HOSTNAME ?? hostname();
 const WORKER_ID = `${WORKER_HOST}-${process.pid}-${crypto.randomUUID().slice(0, 8)}`;
@@ -31,12 +32,16 @@ const POLL_INTERVAL_MS = 3000;
 const MAINTENANCE_INTERVAL_MS = 30_000;
 const ACTIVE = ['queued', 'running', 'paused'] as const;
 
+// Base logger for the poll loop, bound with this process's identity — every line
+// below (and every per-run child) self-locates by workerId/host/pid.
+const log = logger('index').child({ workerId: WORKER_ID, host: WORKER_HOST, pid: process.pid });
+
 let stopping = false;
 let standby = false;
-process.on(
-	'SIGINT',
-	() => ((stopping = true), console.log('\nshutting down after current job...'))
-);
+process.on('SIGINT', () => {
+	stopping = true;
+	log.info('SIGINT received — shutting down after current job');
+});
 process.on('SIGTERM', () => (stopping = true));
 
 /** Apply pending drizzle migrations (same runner the web app uses). */
@@ -46,7 +51,7 @@ async function ensureSchema(): Promise<void> {
 		.filter((f) => f.endsWith('.sql'))
 		.map((name) => ({ name, sql: readFileSync(dir + name, 'utf8') }));
 	const ran = await applyMigrations(client, entries);
-	if (ran.length) console.log(`applied ${ran.length} migration(s): ${ran.join(', ')}`);
+	if (ran.length) log.info({ migrations: ran }, `applied ${ran.length} migration(s)`);
 }
 
 /** Atomically claim the oldest queued run; returns it or null. */
@@ -69,7 +74,10 @@ async function claimNext(): Promise<SyncRun | null> {
 		.limit(1);
 	if (live) {
 		if (!standby) {
-			console.log(`another worker (${live.workerId}) owns an active run — standing by`);
+			log.info(
+				{ activeWorkerId: live.workerId },
+				'another worker owns an active run — standing by'
+			);
 			standby = true;
 		}
 		return null;
@@ -93,7 +101,10 @@ async function claimNext(): Promise<SyncRun | null> {
 }
 
 async function runOne(run: SyncRun, publish: boolean): Promise<void> {
-	console.log(`▶ run ${run.id} mode=${run.mode} max=${run.maxPages ?? 'default'}`);
+	// Per-run child: runId + mode ride on every line the run's own modules emit too
+	// (they bind the same fields off run.*), so the whole run correlates.
+	const runLog = log.child({ runId: run.id, mode: run.mode });
+	runLog.info({ maxPages: run.maxPages ?? 'default', publish }, 'run started');
 	try {
 		if (run.mode === 'sync') await executeSync(run, { publish });
 		else if (run.mode === 'extract') await executeExtract(run);
@@ -102,14 +113,21 @@ async function runOne(run: SyncRun, publish: boolean): Promise<void> {
 		const [done] = await db.select().from(syncRun).where(eq(syncRun.id, run.id));
 		// extract/embed log their own summary (counts are stage-specific, not crawl rollups).
 		if (run.mode !== 'extract' && run.mode !== 'embed') {
-			console.log(
-				`✓ run ${run.id} ${done?.status}: ${done?.pages} pages, ${done?.documents} docs, ` +
-					`${done?.newCount} new / ${done?.changedCount} changed, ${done?.errorCount} errors`
+			runLog.info(
+				{
+					status: done?.status,
+					pages: done?.pages,
+					documents: done?.documents,
+					new: done?.newCount,
+					changed: done?.changedCount,
+					errors: done?.errorCount
+				},
+				'run finished'
 			);
 		}
 	} catch (e) {
 		const msg = e instanceof Error ? (e.stack ?? e.message) : String(e);
-		console.error(`✗ run ${run.id} failed:`, msg);
+		runLog.error({ err: e }, 'run failed');
 		await db
 			.update(syncRun)
 			.set({ status: 'failed', finishedAt: new Date(), error: msg.slice(0, 2000) })
@@ -130,7 +148,8 @@ async function reapStaleRuns(): Promise<void> {
 			)
 		)
 		.returning({ id: syncRun.id });
-	if (reaped.length) console.log(`reaped ${reaped.length} stale run(s)`);
+	if (reaped.length)
+		log.warn({ reaped: reaped.map((r) => r.id) }, `reaped ${reaped.length} stale run(s)`);
 }
 
 /** Auto-schedule: enqueue a `sync` run when enabled, idle, and one is due. */
@@ -151,13 +170,18 @@ async function maybeScheduleSync(): Promise<void> {
 	const dueAt = last ? last.at.getTime() + SYNC_SCHEDULE_MS : 0;
 	if (Date.now() < dueAt) return;
 	await db.insert(syncRun).values({ mode: 'sync', status: 'queued', requestedBy: 'scheduler' });
-	console.log('scheduled sync enqueued');
+	log.info('scheduled sync enqueued');
 }
 
 async function pollLoop(publish: boolean): Promise<void> {
-	const sched = SYNC_SCHEDULE_MS > 0 ? `; auto-sync every ${SYNC_SCHEDULE_MS / 60_000}m` : '';
-	const pub = publish ? '; publishing to R2' : '; local-only (unpublished)';
-	console.log(`sync worker ${WORKER_ID} polling (every ${POLL_INTERVAL_MS}ms${sched}${pub})`);
+	log.info(
+		{
+			pollIntervalMs: POLL_INTERVAL_MS,
+			autoSyncMinutes: SYNC_SCHEDULE_MS > 0 ? SYNC_SCHEDULE_MS / 60_000 : null,
+			publish
+		},
+		'sync worker polling'
+	);
 	let lastMaintenance = 0;
 	while (!stopping) {
 		if (Date.now() - lastMaintenance > MAINTENANCE_INTERVAL_MS) {
@@ -180,7 +204,7 @@ async function pollLoop(publish: boolean): Promise<void> {
 		} else await Bun.sleep(POLL_INTERVAL_MS);
 	}
 	await deregisterWorker(WORKER_ID);
-	console.log('stopped.');
+	log.info('stopped');
 }
 
 async function enqueueAndRunOnce(mode: string, publish: boolean, maxPages?: number): Promise<void> {

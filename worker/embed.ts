@@ -18,6 +18,7 @@ import { EMBED_BATCH } from './config';
 import { chunkText } from './chunk';
 import { selectEmbedder, type Embedder } from './embeddings';
 import { refreshActiveWorker } from './registry';
+import { logger } from '../src/lib/server/log';
 
 const HEARTBEAT_MS = 2000;
 const BATCH = 200; // resources per DB round-trip
@@ -94,6 +95,13 @@ export async function executeEmbed(
 ): Promise<void> {
 	const runId = run.id;
 	const maxPages = run.maxPages ?? Infinity; // --max caps processed resources (testing)
+	// Correlation for the whole embed run — workerId/runId/mode/phase on every line.
+	const log = logger('embed').child({
+		workerId: run.workerId ?? undefined,
+		runId,
+		mode: run.mode,
+		phase: 'embedding'
+	});
 	const embedder = selectEmbedder(opts.embedder);
 	const stats = zero();
 	let control: string = run.control;
@@ -122,7 +130,7 @@ export async function executeEmbed(
 		.set({ status: 'running', startedAt: new Date(), currentPhase: 'embedding' })
 		.where(eq(syncRun.id, runId));
 
-	console.log(`embedder: ${embedder.id} (${embedder.dimensions} dims)`);
+	log.info({ embedder: embedder.id, dimensions: embedder.dimensions }, 'embedder selected');
 
 	// A resource_text row needs work when either:
 	//   • status 'ok' but no chunk carries its current sha (never embedded, or the
@@ -212,7 +220,9 @@ export async function executeEmbed(
 					kind: 'embed_error',
 					message: `embed failed: ${msg}`.slice(0, 500)
 				});
-				console.error(`✗ embed ${r.url}: ${msg}`);
+				// Mirror the crawl_event onto the operational stream (crawl_event itself
+				// is unchanged — this is an additional, matching-level diagnostic).
+				log.error({ err: e, url: r.url, resourceId: r.resourceId }, 'embed failed');
 			}
 		}
 	}
@@ -229,8 +239,15 @@ export async function executeEmbed(
 		})
 		.where(eq(syncRun.id, runId));
 
-	console.log(
-		`✓ embed ${runId} ${status}: ${stats.processed} processed ` +
-			`(${stats.rebuilt} rebuilt → ${stats.chunks} chunks, ${stats.cleared} cleared), ${stats.errors} errors`
+	log.info(
+		{
+			status,
+			processed: stats.processed,
+			rebuilt: stats.rebuilt,
+			chunks: stats.chunks,
+			cleared: stats.cleared,
+			errors: stats.errors
+		},
+		'embed finished'
 	);
 }

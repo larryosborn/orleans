@@ -43,6 +43,7 @@ import {
 	sha256Hex
 } from './http';
 import { refreshActiveWorker } from './registry';
+import { logger } from '../src/lib/server/log';
 
 const HEARTBEAT_MS = 2000;
 
@@ -237,6 +238,13 @@ export async function executeRun(run: SyncRun, opts: { publish?: boolean } = {})
 	const mode = run.mode as Mode;
 	const runId = run.id;
 	const maxPages = run.maxPages ?? MAX_PAGES;
+	// Correlation for the whole crawl — workerId/runId/mode/phase on every line.
+	const log = logger('crawl').child({
+		workerId: run.workerId ?? undefined,
+		runId,
+		mode,
+		phase: 'crawling'
+	});
 
 	// Optional document size limit: docs bigger than this are recorded but not
 	// downloaded (HTML is always fetched). Per-run params override the env default.
@@ -246,7 +254,7 @@ export async function executeRun(run: SyncRun, opts: { publish?: boolean } = {})
 	// Blobs always land in the local backend; R2 write-through is opt-in (--publish).
 	// Only crawl/recrawl write bodies; estimate never touches storage.
 	const writer = makeBlobWriter({ publish: opts.publish ?? false });
-	if (mode !== 'estimate') console.log(`blob store: ${writer.label}`);
+	if (mode !== 'estimate') log.info({ blobStore: writer.label }, 'blob store');
 
 	const robots = await Robots.load(BASE_URL);
 	const stats = zeroStats();
@@ -315,6 +323,7 @@ export async function executeRun(run: SyncRun, opts: { publish?: boolean } = {})
 
 		if (!robots.canFetch(url)) {
 			await logEvent(runId, url, 'robots_blocked', null, null);
+			log.debug({ url }, 'robots blocked');
 			continue;
 		}
 
@@ -344,11 +353,15 @@ export async function executeRun(run: SyncRun, opts: { publish?: boolean } = {})
 
 		const { resp, throttled, error } = await politeFetch(url, headers);
 		stats.requestsMade++;
-		if (throttled) await logEvent(runId, url, 'throttled', null, null);
+		if (throttled) {
+			await logEvent(runId, url, 'throttled', null, null);
+			log.debug({ url }, 'throttled');
+		}
 
 		if (!resp) {
 			stats.errorCount++;
 			await logEvent(runId, url, 'fetch_error', null, error ?? 'no response');
+			log.warn({ url, error: error ?? 'no response' }, 'fetch error');
 			await recordFailure(runId, url, prev?.id, 0, 'error');
 			await politeDelay();
 			continue;
@@ -364,6 +377,7 @@ export async function executeRun(run: SyncRun, opts: { publish?: boolean } = {})
 			resp.body?.cancel();
 			stats.errorCount++;
 			await logEvent(runId, url, 'http_error', resp.status, null);
+			log.warn({ url, status: resp.status }, 'http error');
 			if (resp.status === 404 || resp.status === 410) {
 				stats.goneCount++;
 				await recordGone(runId, url, prev?.id, resp.status);
@@ -419,9 +433,16 @@ export async function executeSync(run: SyncRun, opts: { publish?: boolean } = {}
 	const maxPages = run.maxPages ?? MAX_PAGES;
 	const params = run.params ? (JSON.parse(run.params) as { maxDocBytes?: number }) : {};
 	const maxDocBytes = typeof params.maxDocBytes === 'number' ? params.maxDocBytes : MAX_DOC_BYTES;
+	// Correlation for the whole sync run — workerId/runId/mode/phase on every line.
+	const log = logger('crawl').child({
+		workerId: run.workerId ?? undefined,
+		runId,
+		mode: run.mode,
+		phase: 'crawling'
+	});
 	// Blobs always land in the local backend; R2 write-through is opt-in (--publish).
 	const writer = makeBlobWriter({ publish: opts.publish ?? false });
-	console.log(`blob store: ${writer.label}`);
+	log.info({ blobStore: writer.label }, 'blob store');
 
 	const robots = await Robots.load(BASE_URL);
 	const stats = zeroStats();
@@ -529,6 +550,7 @@ export async function executeSync(run: SyncRun, opts: { publish?: boolean } = {}
 			}
 			if (!robots.canFetch(r.url)) {
 				await logEvent(runId, r.url, 'robots_blocked', null, null);
+				log.debug({ url: r.url }, 'robots blocked');
 				await schedule(r.id, r.priority);
 				continue;
 			}
@@ -540,11 +562,15 @@ export async function executeSync(run: SyncRun, opts: { publish?: boolean } = {}
 
 			const { resp, throttled, error } = await politeFetch(r.url, headers);
 			stats.requestsMade++;
-			if (throttled) await logEvent(runId, r.url, 'throttled', null, null);
+			if (throttled) {
+				await logEvent(runId, r.url, 'throttled', null, null);
+				log.debug({ url: r.url }, 'throttled');
+			}
 
 			if (!resp) {
 				stats.errorCount++;
 				await logEvent(runId, r.url, 'fetch_error', null, error ?? 'no response');
+				log.warn({ url: r.url, error: error ?? 'no response' }, 'fetch error');
 				await recordFailure(runId, r.url, r.id, 0, 'error');
 				await db
 					.update(resource)
@@ -565,6 +591,7 @@ export async function executeSync(run: SyncRun, opts: { publish?: boolean } = {}
 				resp.body?.cancel();
 				stats.errorCount++;
 				await logEvent(runId, r.url, 'http_error', resp.status, null);
+				log.warn({ url: r.url, status: resp.status }, 'http error');
 				if (resp.status === 404 || resp.status === 410) {
 					stats.goneCount++;
 					await recordGone(runId, r.url, r.id, resp.status);

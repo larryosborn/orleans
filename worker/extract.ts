@@ -22,6 +22,7 @@ import { blob, crawlEvent, resource, resourceText, syncRun } from '../src/lib/se
 import type { ExtractionStatus, SyncRun } from '../src/lib/server/db/crawl.schema';
 import { localDir, makeLocalStorage, makeR2Storage } from './storage';
 import { refreshActiveWorker } from './registry';
+import { logger } from '../src/lib/server/log';
 
 const HEARTBEAT_MS = 2000;
 const BATCH = 200; // resources per DB round-trip
@@ -179,6 +180,13 @@ async function writeResult(
 export async function executeExtract(run: SyncRun): Promise<void> {
 	const runId = run.id;
 	const maxPages = run.maxPages ?? Infinity; // --max caps processed count (testing)
+	// Correlation for the whole extract run — workerId/runId/mode/phase on every line.
+	const log = logger('extract').child({
+		workerId: run.workerId ?? undefined,
+		runId,
+		mode: run.mode,
+		phase: 'extracting'
+	});
 	const readBlob = makeBlobReader();
 	const stats = zero();
 	let control: string = run.control;
@@ -260,6 +268,7 @@ export async function executeExtract(run: SyncRun): Promise<void> {
 				if (!bytes) {
 					stats.missingBlob++;
 					await logEvent(runId, r.url, r.id, 'blob bytes not found in any backend');
+					log.warn({ url: r.url, resourceId: r.id }, 'blob bytes not found in any backend');
 					continue;
 				}
 				const result = await extractFromBlob(r.contentType, bytes);
@@ -270,6 +279,7 @@ export async function executeExtract(run: SyncRun): Promise<void> {
 				stats.errors++;
 				const msg = e instanceof Error ? e.message : String(e);
 				await logEvent(runId, r.url, r.id, `extract failed: ${msg}`.slice(0, 500));
+				log.error({ err: e, url: r.url, resourceId: r.id }, 'extract failed');
 			}
 		}
 	}
@@ -286,10 +296,18 @@ export async function executeExtract(run: SyncRun): Promise<void> {
 		})
 		.where(eq(syncRun.id, runId));
 
-	console.log(
-		`✓ extract ${runId} ${status}: ${stats.processed} processed ` +
-			`(${stats.ok} ok, ${stats.empty} empty, ${stats.scanned} scanned, ` +
-			`${stats.unsupported} unsupported), ${stats.missingBlob} missing-blob, ${stats.errors} errors`
+	log.info(
+		{
+			status,
+			processed: stats.processed,
+			ok: stats.ok,
+			empty: stats.empty,
+			scanned: stats.scanned,
+			unsupported: stats.unsupported,
+			missingBlob: stats.missingBlob,
+			errors: stats.errors
+		},
+		'extract finished'
 	);
 }
 
