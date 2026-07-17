@@ -113,3 +113,23 @@ export const SYNC_SCHEDULE_MS = Number(process.env.SYNC_SCHEDULE_MINUTES ?? 0) *
 // A run whose heartbeat is older than this is considered dead and reaped, so a
 // crashed worker doesn't leave a `running` row blocking the schedule forever.
 export const STALE_RUN_MS = Number(process.env.WORKER_STALE_MINUTES ?? 5) * 60_000;
+
+// ---------------------------------------------------------------------------
+// Embedding pipeline (mode = "embed"): chunking + embedding knobs. The vector
+// DIMENSION is fixed by the schema (EMBED_DIM in crawl.schema.ts), not here — a
+// model with different dims needs a migration. See worker/embeddings.ts for the
+// provider selection and worker/chunk.ts for the splitter.
+// ---------------------------------------------------------------------------
+// Target chunk size (characters) and overlap between neighbouring chunks. Chunks
+// split on natural boundaries (paragraph/sentence) and never exceed the max.
+export const CHUNK_MAX_CHARS = Number(process.env.EMBED_CHUNK_CHARS ?? 1200);
+export const CHUNK_OVERLAP_CHARS = Number(process.env.EMBED_CHUNK_OVERLAP ?? 200);
+// How many chunks to send to the embedding model per request (batching).
+export const EMBED_BATCH = Number(process.env.EMBED_BATCH ?? 32);
+// Which embedding provider to use: 'cloudflare' | 'openai' | 'fake'. Unset =
+// auto-detect from available credentials, falling back to the deterministic
+// 'fake' embedder (so the pipeline runs offline / in CI). See selectEmbedder().
+export const EMBEDDING_PROVIDER = process.env.EMBEDDING_PROVIDER;
+export const CLOUDFLARE_EMBED_MODEL =
+	process.env.CLOUDFLARE_EMBED_MODEL ?? '@cf/baai/bge-base-en-v1.5';
+export const OPENAI_EMBED_MODEL = process.env.OPENAI_EMBED_MODEL ?? 'text-embedding-3-small';

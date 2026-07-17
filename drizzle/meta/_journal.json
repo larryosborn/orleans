@@ -43,6 +43,13 @@
       "when": 1784254066273,
       "tag": "0005_soft_spacker_dave",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1784255696212,
+      "tag": "0006_loud_dreaming_celestial",
+      "breakpoints": true
     }
   ]
 }

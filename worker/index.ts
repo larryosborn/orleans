@@ -20,6 +20,7 @@ import { applyMigrations } from '../src/lib/server/db/migrator';
 import { SYNC_SCHEDULE_MS, STALE_RUN_MS } from './config';
 import { executeRun, executeSync } from './crawl';
 import { executeExtract } from './extract';
+import { executeEmbed } from './embed';
 
 const WORKER_ID = `${process.env.HOSTNAME ?? 'worker'}-${process.pid}-${crypto.randomUUID().slice(0, 8)}`;
 const POLL_INTERVAL_MS = 3000;
@@ -92,10 +93,11 @@ async function runOne(run: SyncRun, publish: boolean): Promise<void> {
 	try {
 		if (run.mode === 'sync') await executeSync(run, { publish });
 		else if (run.mode === 'extract') await executeExtract(run);
+		else if (run.mode === 'embed') await executeEmbed(run);
 		else await executeRun(run, { publish });
 		const [done] = await db.select().from(syncRun).where(eq(syncRun.id, run.id));
-		// extract logs its own summary (counts are extraction-specific, not crawl rollups).
-		if (run.mode !== 'extract') {
+		// extract/embed log their own summary (counts are stage-specific, not crawl rollups).
+		if (run.mode !== 'extract' && run.mode !== 'embed') {
 			console.log(
 				`✓ run ${run.id} ${done?.status}: ${done?.pages} pages, ${done?.documents} docs, ` +
 					`${done?.newCount} new / ${done?.changedCount} changed, ${done?.errorCount} errors`

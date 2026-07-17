@@ -35,6 +35,8 @@ container, or your laptop. Nothing about it is Vercel/Cloudflare specific.
 - **`link`** — the discovered link graph (relations).
 - **`sync_run`** — run status, heartbeat, and rollup counters.
 - **`crawl_event`** — per-URL errors / notable events.
+- **`resource_text`** — cleaned extracted text per resource (the `extract` mode).
+- **`chunk`** — retrieval-sized text chunks + libSQL-native embedding vectors (the `embed` mode).
 
 ## Modes
 
@@ -44,9 +46,44 @@ container, or your laptop. Nothing about it is Vercel/Cloudflare specific.
 | `estimate` | no (HEAD-ish)     | no             | Cheap census: discovery + sizes + relations                                    |
 | `crawl`    | yes               | yes (new only) | One-shot BFS; skips already-captured URLs                                      |
 | `recrawl`  | yes               | yes (changed)  | One-shot BFS re-check via conditional GET                                      |
+| `extract`  | no                | no             | RAG stage 1: blob → cleaned main-content text in `resource_text`               |
+| `embed`    | no                | no             | RAG stage 2: `resource_text` → chunks + embedding vectors in `chunk`           |
 
 `estimate` writes real rows (resources, links, probed versions with sizes/etags)
 so it's a persistent, diffable snapshot — not just a printout.
+
+## RAG pipeline (`extract` → `embed`)
+
+Two derivation stages turn captured content into retrieval-ready vectors. Both are
+content-addressed and idempotent — a re-run does work only where the source changed.
+
+```bash
+bun run worker:extract   # blobs → resource_text (cleaned main-content text)
+bun run worker:embed     # resource_text (status ok) → chunk (text + F32_BLOB vector)
+```
+
+`embed` chunks each resource's extracted text (recording char offsets), embeds each
+chunk via a configured model, and stores it in `chunk` with the vector in a
+libSQL-native `F32_BLOB` column plus an ANN index (`chunk_vec_idx`), so retrieval
+(#36) can run `vector_top_k('chunk_vec_idx', vector32(?), k)`. Freshness mirrors
+extraction: each chunk records the `resource_text.sha256` it was built from, so a
+content change re-embeds **only** that resource and leaves no orphan/stale chunks
+(a resource whose text stops being `ok` has its chunks removed).
+
+**Embedding model** is chosen by config, behind a small `Embedder` interface, so
+swapping needs no call-site changes (see `worker/embeddings.ts`):
+
+- `EMBEDDING_PROVIDER=cloudflare` → Workers AI `@cf/baai/bge-base-en-v1.5` (768-dim
+  native; needs `CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_API_TOKEN`)
+- `EMBEDDING_PROVIDER=openai` → `text-embedding-3-small` requested at 768 dims
+  (needs `OPENAI_API_KEY`)
+- `EMBEDDING_PROVIDER=fake` (or no credentials) → a deterministic offline embedder,
+  so the pipeline runs in CI / locally without any API
+
+All providers emit `EMBED_DIM` (768) dimensions to match the fixed `F32_BLOB(768)`
+column width. A model with a different dimensionality needs a new migration
+(vector columns are fixed-width) — see `EMBED_DIM` in
+[`crawl.schema.ts`](../src/lib/server/db/crawl.schema.ts).
 
 **Document size limit.** In `crawl`/`recrawl`, HTML is always downloaded but large
 binaries can be skipped: `CRAWLER_MAX_DOC_BYTES` (env default) or per-run
