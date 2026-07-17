@@ -588,7 +588,13 @@ export async function executeSync(run: SyncRun, opts: { publish?: boolean } = {}
 	await finalizeRun(runId, control === 'cancel' ? 'canceled' : 'completed', stats);
 }
 
-/** Seed the frontier: module roots (tier 1) + sitemap core pages (tier 0). */
+/** Seed the frontier: module roots (tier 1) + sitemap core pages (tier 0).
+ *  NOT gated by the discovery toggle — seeds/sitemap are the *known site
+ *  structure* (the backlog to drain), a separate concern from frontier discovery,
+ *  which is specifically the ingest of newly-found links from fetched page bodies
+ *  (see the `discoveryEnabled` gate in executeSync). Seeds run once at run start
+ *  and are bounded, so they don't cause the runaway frontier growth the toggle
+ *  exists to pause. */
 async function refreshSeeds(runId: string, stats: Stats): Promise<void> {
 	const roots = SEED_PATHS.map((p) => normalize(p, BASE_URL)).filter(
 		(u) => !u.endsWith('sitemap.xml') && inScope(u)
