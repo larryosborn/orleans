@@ -26,6 +26,7 @@
 		"db:studio": "drizzle-kit studio",
 		"worker": "bun run worker/index.ts",
 		"worker:estimate": "bun run worker/index.ts --mode estimate --once",
+		"worker:extract": "bun run worker/index.ts --mode extract --once",
 		"blobs:sync": "bun run worker/sync-blobs.ts --both",
 		"blobs:push": "bun run worker/sync-blobs.ts --push",
 		"blobs:pull": "bun run worker/sync-blobs.ts --pull",
@@ -97,6 +98,9 @@
 		"*.{js,ts,svelte}": "eslint --fix"
 	},
 	"dependencies": {
-		"aws4fetch": "^1.0.20"
+		"@mozilla/readability": "^0.6.0",
+		"aws4fetch": "^1.0.20",
+		"linkedom": "^0.18.13",
+		"unpdf": "^1.6.2"
 	}
 }

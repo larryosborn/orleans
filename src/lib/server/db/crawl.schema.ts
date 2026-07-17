@@ -110,6 +110,47 @@ export const resourceVersion = sqliteTable(
 );
 
 // ---------------------------------------------------------------------------
+// resource_text — cleaned, retrievable main-content plain text per resource, the
+// input to the RAG pipeline (chunking/embedding, retrieval). Kept OUT of the blob
+// store on purpose: it's derived, cheap to recompute, and queried relationally.
+//
+// Cached by *content* hash: `sha256` is the resource's content fingerprint the
+// text was extracted from. A resource has at most one row (unique on
+// resource_id); on a content change the row is overwritten with the new sha +
+// text. So extraction skips a resource whose stored `sha256` already matches its
+// row, and re-extracts when the content (hence the sha) changes.
+//
+// `status` is a closed set: `ok` (text extracted) | `empty` (parsed, no usable
+// text) | `scanned` (image-only PDF, no text layer — NOT an error) | `unsupported`
+// (a content type we don't extract, e.g. Office docs). `text` is populated only
+// for `ok`. The `scanned` status is the queryable image-only-PDF census.
+// ---------------------------------------------------------------------------
+export const resourceText = sqliteTable(
+	'resource_text',
+	{
+		id: text('id').primaryKey().$defaultFn(uuid),
+		resourceId: text('resource_id')
+			.notNull()
+			.references(() => resource.id, { onDelete: 'cascade' }),
+		// content fingerprint this text was extracted from (matches resource.sha256 /
+		// blob.sha256). Drives the content-addressed cache — see the table comment.
+		sha256: text('sha256').notNull(),
+		contentType: text('content_type'), // the stored blob's content type (html / pdf / …)
+		status: text('status').notNull(), // ok | empty | scanned | unsupported
+		text: text('text'), // extracted plain text; null unless status = 'ok'
+		charCount: integer('char_count').notNull().default(0),
+		extractor: text('extractor'), // which seam produced it (e.g. html:readability, pdf:unpdf)
+		createdAt: integer('created_at', { mode: 'timestamp_ms' }).default(nowMs).notNull(),
+		updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).default(nowMs).notNull()
+	},
+	(t) => [
+		uniqueIndex('resource_text_resource_unique').on(t.resourceId),
+		index('resource_text_sha_idx').on(t.sha256),
+		index('resource_text_status_idx').on(t.status)
+	]
+);
+
+// ---------------------------------------------------------------------------
 // link — the discovered relation graph (who links to what). `to_resource_id`
 // is backfilled when the target URL becomes a known resource; `to_url` always
 // holds the raw normalized target so nothing is lost before that.
@@ -198,8 +239,12 @@ export const crawlEvent = sqliteTable(
 	(t) => [index('crawl_event_run_idx').on(t.runId), index('crawl_event_kind_idx').on(t.kind)]
 );
 
+/** Closed set of extraction outcomes stored on `resource_text.status`. */
+export type ExtractionStatus = 'ok' | 'empty' | 'scanned' | 'unsupported';
+
 export type Resource = typeof resource.$inferSelect;
 export type ResourceVersion = typeof resourceVersion.$inferSelect;
+export type ResourceText = typeof resourceText.$inferSelect;
 export type Blob = typeof blob.$inferSelect;
 export type Link = typeof link.$inferSelect;
 export type SyncRun = typeof syncRun.$inferSelect;

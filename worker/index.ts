@@ -19,6 +19,7 @@ import type { SyncRun } from '../src/lib/server/db/crawl.schema';
 import { applyMigrations } from '../src/lib/server/db/migrator';
 import { SYNC_SCHEDULE_MS, STALE_RUN_MS } from './config';
 import { executeRun, executeSync } from './crawl';
+import { executeExtract } from './extract';
 
 const WORKER_ID = `${process.env.HOSTNAME ?? 'worker'}-${process.pid}-${crypto.randomUUID().slice(0, 8)}`;
 const POLL_INTERVAL_MS = 3000;
@@ -90,12 +91,16 @@ async function runOne(run: SyncRun, publish: boolean): Promise<void> {
 	console.log(`▶ run ${run.id} mode=${run.mode} max=${run.maxPages ?? 'default'}`);
 	try {
 		if (run.mode === 'sync') await executeSync(run, { publish });
+		else if (run.mode === 'extract') await executeExtract(run);
 		else await executeRun(run, { publish });
 		const [done] = await db.select().from(syncRun).where(eq(syncRun.id, run.id));
-		console.log(
-			`✓ run ${run.id} ${done?.status}: ${done?.pages} pages, ${done?.documents} docs, ` +
-				`${done?.newCount} new / ${done?.changedCount} changed, ${done?.errorCount} errors`
-		);
+		// extract logs its own summary (counts are extraction-specific, not crawl rollups).
+		if (run.mode !== 'extract') {
+			console.log(
+				`✓ run ${run.id} ${done?.status}: ${done?.pages} pages, ${done?.documents} docs, ` +
+					`${done?.newCount} new / ${done?.changedCount} changed, ${done?.errorCount} errors`
+			);
+		}
 	} catch (e) {
 		const msg = e instanceof Error ? (e.stack ?? e.message) : String(e);
 		console.error(`✗ run ${run.id} failed:`, msg);
