@@ -20,6 +20,10 @@
 	let streamedProgress = $state<typeof data.progress | undefined>(undefined);
 	let streamedProcessing = $state<typeof data.processing | undefined>(undefined);
 	const processing = $derived(streamedProcessing ?? data.processing);
+	// Worker registry + derived health flags, streamed on the aggregate cadence and
+	// falling back to the server-loaded snapshot until the first tick arrives.
+	let streamedWorkerHealth = $state<typeof data.workerHealth | undefined>(undefined);
+	const wh = $derived(streamedWorkerHealth ?? data.workerHealth);
 	// New URLs discovered since the last aggregate tick — a nonzero value means the
 	// frontier (and the Overall denominator) is still growing, not converged yet.
 	let recentDelta = $state(0);
@@ -62,6 +66,7 @@
 				streamedProgress = p.progress;
 			}
 			if (p?.processing) streamedProcessing = p.processing;
+			if (p?.workerHealth) streamedWorkerHealth = p.workerHealth;
 			// When the active run ends, refresh aggregates (tiles, feed, alert).
 			if (wasActive && !run) invalidateAll();
 		});
@@ -113,6 +118,41 @@
 		idle: { label: 'idle', dot: 'bg-muted-foreground/50', ping: false }
 	};
 	const status = $derived(STATUS[statusKind]);
+
+	// Worker-health alerts, derived from the read model's flags. All are warnings —
+	// none change worker behavior (a stall is never auto-failed). Standby count is
+	// shown separately (below) and is deliberately NOT an alert.
+	const whAlerts = $derived.by(() => {
+		const f = wh.flags;
+		const out: { key: string; label: string; detail: string }[] = [];
+		if (f.noActiveWorker)
+			out.push({
+				key: 'no-active-worker',
+				label: 'No active worker',
+				detail: 'A run is active but no worker is processing it — start one with `bun run worker`.'
+			});
+		if (f.staleHeartbeat)
+			out.push({
+				key: 'stale-heartbeat',
+				label: 'Stale heartbeat',
+				detail: "The active run hasn't heartbeat recently — the worker may have stopped."
+			});
+		if (f.stalled)
+			out.push({
+				key: 'stalled',
+				label: 'Stalled',
+				detail:
+					'The worker is still heartbeating but progress has not advanced — it may be stuck. (Warning only; the run is never auto-failed.)'
+			});
+		if (f.multipleActive)
+			out.push({
+				key: 'multiple-active',
+				label: '>1 active worker',
+				detail:
+					'More than one worker holds the active role — the single-writer guard should prevent this.'
+			});
+		return out;
+	});
 
 	const maxStorage = $derived(Math.max(1, ...data.storage.map((s) => Number(s.bytes))));
 
@@ -375,6 +415,60 @@
 			{:else}
 				<p class="text-sm text-muted-foreground">No runs yet. Start one below.</p>
 			{/if}
+
+			<!-- Worker health: the live process registry (active + standby) plus derived
+			     warnings. Standby count is shown but is never itself an alert. -->
+			<div class="mt-4 space-y-2 border-t pt-4">
+				<div class="flex items-center justify-between">
+					<p class="text-xs font-medium">Workers</p>
+					<span class="text-xs text-muted-foreground tabular-nums">
+						{wh.activeCount} active · {wh.standbyCount} standby
+					</span>
+				</div>
+
+				{#if whAlerts.length}
+					<div class="flex flex-wrap gap-2">
+						{#each whAlerts as a (a.key)}
+							<Badge variant="destructive" title={a.detail}>{a.label}</Badge>
+						{/each}
+					</div>
+				{/if}
+
+				{#if wh.workers.length}
+					<ul class="divide-y">
+						{#each wh.workers as w (w.id)}
+							<li class="flex items-center gap-2 py-1.5 text-xs">
+								<Badge
+									variant={w.role === 'active' ? 'default' : 'outline'}
+									class="w-16 shrink-0 justify-center capitalize"
+								>
+									{w.role}
+								</Badge>
+								<span class="min-w-0 flex-1 truncate font-mono text-muted-foreground" title={w.id}>
+									{w.host}:{w.pid}{#if w.phase}
+										· {w.phase}{/if}
+								</span>
+								<span class="shrink-0 tabular-nums text-muted-foreground">
+									up {formatDuration(w.startedAt)}
+								</span>
+								<span
+									class={`shrink-0 tabular-nums ${w.stale ? 'text-amber-600 dark:text-amber-500' : 'text-muted-foreground'}`}
+									title="time since this worker last refreshed its registration"
+								>
+									seen {formatRelative(w.lastSeenAt)}{#if w.stale}
+										· stale{/if}
+								</span>
+							</li>
+						{/each}
+					</ul>
+				{:else}
+					<p class="text-xs text-muted-foreground">
+						No workers registered. Start one with <code
+							class="rounded bg-muted px-1 py-0.5 font-mono">bun run worker</code
+						>.
+					</p>
+				{/if}
+			</div>
 		</Card.Content>
 	</Card.Root>
 

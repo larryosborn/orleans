@@ -291,6 +291,11 @@ export const syncRun = sqliteTable(
 		finishedAt: integer('finished_at', { mode: 'timestamp_ms' }),
 		workerId: text('worker_id'),
 		heartbeatAt: integer('heartbeat_at', { mode: 'timestamp_ms' }),
+		// Last time a forward-progress counter (requests-made / fetched) advanced —
+		// bumped by the heartbeat ONLY when progress moved, never on a progress-less
+		// beat. A run that keeps heartbeating while this stays put is "stalled" (a
+		// dashboard warning; the worker never auto-fails on it). See writeHeartbeat.
+		progressAt: integer('progress_at', { mode: 'timestamp_ms' }),
 		currentUrl: text('current_url'),
 		currentPhase: text('current_phase'),
 		// rollups
@@ -313,6 +318,31 @@ export const syncRun = sqliteTable(
 		index('sync_run_status_idx').on(t.status),
 		index('sync_run_requested_idx').on(t.requestedAt)
 	]
+);
+
+// ---------------------------------------------------------------------------
+// worker — lightweight process registry. One row per live worker process,
+// active AND standby. The single-writer guard means only the claiming worker
+// touches a run row (see claimNext in worker/index.ts), so standbys and the
+// total process count were previously invisible. Every worker upserts its own
+// row (identity + role + last-seen) on the maintenance tick; the active worker
+// also refreshes it on each crawl heartbeat so a long run never looks dead. A
+// sweep drops rows older than the stale-run threshold, and a worker best-effort
+// deletes its own row on shutdown, so the table reflects the live set.
+// ---------------------------------------------------------------------------
+export const worker = sqliteTable(
+	'worker',
+	{
+		id: text('id').primaryKey(), // stable per-process id (host-pid-rand)
+		host: text('host').notNull(),
+		pid: integer('pid').notNull(),
+		role: text('role').notNull().default('standby'), // active | standby
+		runId: text('run_id'), // the run this worker owns, when active
+		phase: text('phase'), // that run's current phase, when active
+		startedAt: integer('started_at', { mode: 'timestamp_ms' }).default(nowMs).notNull(),
+		lastSeenAt: integer('last_seen_at', { mode: 'timestamp_ms' }).default(nowMs).notNull()
+	},
+	(t) => [index('worker_last_seen_idx').on(t.lastSeenAt)]
 );
 
 // ---------------------------------------------------------------------------
@@ -344,4 +374,5 @@ export type Chunk = typeof chunk.$inferSelect;
 export type Blob = typeof blob.$inferSelect;
 export type Link = typeof link.$inferSelect;
 export type SyncRun = typeof syncRun.$inferSelect;
+export type Worker = typeof worker.$inferSelect;
 export type CrawlEvent = typeof crawlEvent.$inferSelect;

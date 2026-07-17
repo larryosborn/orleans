@@ -17,6 +17,7 @@ import type { SyncRun } from '../src/lib/server/db/crawl.schema';
 import { EMBED_BATCH } from './config';
 import { chunkText } from './chunk';
 import { selectEmbedder, type Embedder } from './embeddings';
+import { refreshActiveWorker } from './registry';
 
 const HEARTBEAT_MS = 2000;
 const BATCH = 200; // resources per DB round-trip
@@ -105,6 +106,9 @@ export async function executeEmbed(
 		const nowMs = Date.now();
 		if (nowMs - lastBeat < HEARTBEAT_MS) return;
 		lastBeat = nowMs;
+		// Keep the active worker's registry row fresh so a long embed run isn't swept
+		// from the live set (best-effort — must not disturb embedding).
+		await refreshActiveWorker(run.workerId, runId, 'embedding');
 		const [r] = await db
 			.update(syncRun)
 			.set({ heartbeatAt: new Date(), currentUrl })

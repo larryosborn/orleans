@@ -10,6 +10,7 @@
 // Publishing is opt-in: without --publish the worker holds blobs in the LOCAL
 // backend only (r2_synced_at null); with --publish it writes through to R2 (the
 // canonical archive) and stamps r2_synced_at. Prod runs pass --publish.
+import { hostname } from 'node:os';
 import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { and, asc, desc, eq, gt, inArray, lt } from 'drizzle-orm';
@@ -21,8 +22,11 @@ import { SYNC_SCHEDULE_MS, STALE_RUN_MS } from './config';
 import { executeRun, executeSync } from './crawl';
 import { executeExtract } from './extract';
 import { executeEmbed } from './embed';
+import { deregisterWorker, sweepStaleWorkers, upsertWorker, type WorkerIdentity } from './registry';
 
-const WORKER_ID = `${process.env.HOSTNAME ?? 'worker'}-${process.pid}-${crypto.randomUUID().slice(0, 8)}`;
+const WORKER_HOST = process.env.HOSTNAME ?? hostname();
+const WORKER_ID = `${WORKER_HOST}-${process.pid}-${crypto.randomUUID().slice(0, 8)}`;
+const IDENTITY: WorkerIdentity = { id: WORKER_ID, host: WORKER_HOST, pid: process.pid };
 const POLL_INTERVAL_MS = 3000;
 const MAINTENANCE_INTERVAL_MS = 30_000;
 const ACTIVE = ['queued', 'running', 'paused'] as const;
@@ -159,12 +163,23 @@ async function pollLoop(publish: boolean): Promise<void> {
 		if (Date.now() - lastMaintenance > MAINTENANCE_INTERVAL_MS) {
 			lastMaintenance = Date.now();
 			await reapStaleRuns();
+			await sweepStaleWorkers(STALE_RUN_MS);
+			// Refresh this process's registry row. Between jobs a worker is a standby
+			// (idle or standing down behind the single-writer guard); the active role is
+			// stamped on claim + each heartbeat, so this refresh is always standby.
+			await upsertWorker(IDENTITY, 'standby', null, null);
 			await maybeScheduleSync();
 		}
 		const run = await claimNext();
-		if (run) await runOne(run, publish);
-		else await Bun.sleep(POLL_INTERVAL_MS);
+		if (run) {
+			// Flip to active immediately (the heartbeat keeps it fresh mid-run),
+			// then back to standby when the run returns.
+			await upsertWorker(IDENTITY, 'active', run.id, run.currentPhase ?? null);
+			await runOne(run, publish);
+			await upsertWorker(IDENTITY, 'standby', null, null);
+		} else await Bun.sleep(POLL_INTERVAL_MS);
 	}
+	await deregisterWorker(WORKER_ID);
 	console.log('stopped.');
 }
 

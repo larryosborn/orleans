@@ -21,6 +21,7 @@ import { db } from './db';
 import { blob, crawlEvent, resource, resourceText, syncRun } from '../src/lib/server/db/schema';
 import type { ExtractionStatus, SyncRun } from '../src/lib/server/db/crawl.schema';
 import { localDir, makeLocalStorage, makeR2Storage } from './storage';
+import { refreshActiveWorker } from './registry';
 
 const HEARTBEAT_MS = 2000;
 const BATCH = 200; // resources per DB round-trip
@@ -192,6 +193,9 @@ export async function executeExtract(run: SyncRun): Promise<void> {
 		const nowMs = Date.now();
 		if (nowMs - lastBeat < HEARTBEAT_MS) return;
 		lastBeat = nowMs;
+		// Keep the active worker's registry row fresh so a long extract run isn't
+		// swept from the live set (best-effort — must not disturb extraction).
+		await refreshActiveWorker(run.workerId, runId, 'extracting');
 		const [row] = await db
 			.update(syncRun)
 			.set({ heartbeatAt: new Date(), currentUrl })
