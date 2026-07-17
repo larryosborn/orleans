@@ -13,8 +13,13 @@
 // abstain/fallback topics (shellfish fees, election dates, fireworks times,
 // zoning) — so the abstention bar is actually tested: the answerer only has real
 // records for the questions it should ground, and nothing to lean on for the rest.
-import type { Client } from '@libsql/client';
-import type { Embedder } from '../embeddings';
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createClient, type Client } from '@libsql/client';
+import { applyMigrations } from '../../src/lib/server/db/migrator';
+import { makeFakeEmbedder, type Embedder } from '../embeddings';
 import { makeFakeLlm, type LlmClient } from '../../src/lib/server/rag/llm';
 import { SOURCES } from './questions';
 
@@ -88,11 +93,11 @@ export async function seedCorpus(
 	const vectors = await embedder.embed(docs.map((d) => d.text));
 	for (let i = 0; i < docs.length; i++) {
 		const d = docs[i];
-		const path = new URL(d.url).pathname;
+		const u = new URL(d.url);
 		await client.execute({
 			sql: `INSERT INTO resource (id, url, url_hash, host, path, kind, title, state, priority)
 			      VALUES (?, ?, ?, ?, ?, 'page', ?, ?, 1)`,
-			args: [d.id, d.url, `h-${d.id}`, new URL(d.url).host, path, d.title, d.state]
+			args: [d.id, d.url, `h-${d.id}`, u.host, u.pathname, d.title, d.state]
 		});
 		await client.execute({
 			sql: `INSERT INTO chunk (id, resource_id, source_sha, chunk_index, text, char_start, char_end, embedding, embedder, url, title, kind, created_at)
@@ -111,6 +116,34 @@ export async function seedCorpus(
 			]
 		});
 	}
+}
+
+/** A ready-to-query offline fixture DB: a throwaway libSQL file with the real
+ *  migrations applied and the fixture corpus seeded (fake embedder). Returns the
+ *  client, the embedder used (reuse it so query and chunk vectors match), and a
+ *  `cleanup` that closes the client and removes the temp dir. */
+export function createFixtureDb(docs: FixtureDoc[] = fixtureDocs): Promise<{
+	client: Client;
+	embedder: Embedder;
+	cleanup: () => void;
+}> {
+	const drizzleDir = fileURLToPath(new URL('../../drizzle/', import.meta.url));
+	const tmp = mkdtempSync(join(tmpdir(), 'rag-eval-'));
+	const client = createClient({ url: `file:${join(tmp, 'eval.db')}` });
+	const embedder = makeFakeEmbedder();
+	const entries = readdirSync(drizzleDir)
+		.filter((f) => f.endsWith('.sql'))
+		.map((name) => ({ name, sql: readFileSync(join(drizzleDir, name), 'utf8') }));
+	return applyMigrations(client, entries)
+		.then(() => seedCorpus(client, embedder, docs))
+		.then(() => ({
+			client,
+			embedder,
+			cleanup: () => {
+				client.close();
+				rmSync(tmp, { recursive: true, force: true });
+			}
+		}));
 }
 
 // ---------------------------------------------------------------------------

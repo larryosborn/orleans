@@ -54,11 +54,12 @@ export interface EvalReport {
 export interface RunEvalDeps {
 	retrieve: (question: string, opts?: RetrieveOptions) => Promise<RetrievalResult>;
 	answer: (question: string, opts?: AnswerOptions) => Promise<Answer>;
-	/** Retrieval knobs (injected client/embedder, topK) — shared by both calls so
-	 *  the hit-rate we measure is the same retrieval the answerer grounded on. */
+	/** Retrieval knobs (injected client/embedder, topK) for the harness's own
+	 *  retrieval call. */
 	retrieveOptions?: RetrieveOptions;
-	/** Answer knobs (injected llm, model). `retrieveOptions` is forwarded for you. */
-	answerOptions?: Omit<AnswerOptions, 'retrieveOptions'>;
+	/** Answer knobs (injected llm, model). Retrieval is wired in by the harness —
+	 *  see below — so `retrieve`/`retrieveOptions` are not accepted here. */
+	answerOptions?: Omit<AnswerOptions, 'retrieve' | 'retrieveOptions'>;
 }
 
 /** Run the whole question set, scoring each question. Deterministic given
@@ -66,13 +67,16 @@ export interface RunEvalDeps {
 export async function runEval(questions: EvalQuestion[], deps: RunEvalDeps): Promise<EvalReport> {
 	const outcomes: EvalOutcome[] = [];
 	for (const q of questions) {
-		// One retrieval for the hit-rate metric; the answerer runs its own retrieval
-		// with the SAME options, so — being deterministic — it grounds on the same set.
+		// Retrieve ONCE and hand the very same result to the answerer (answer()
+		// accepts a `retrieve` override). So the citations we validate are grounded
+		// in exactly the passages we scored for hit-rate — sound even in real mode,
+		// where a second embed+ANN call could otherwise diverge — and we don't pay
+		// for two retrievals per question.
 		const retrieval = await deps.retrieve(q.question, deps.retrieveOptions);
 		const retrievedUrls = retrieval.sources.map((s) => s.url);
 		const a = await deps.answer(q.question, {
 			...deps.answerOptions,
-			retrieveOptions: deps.retrieveOptions
+			retrieve: async () => retrieval
 		});
 
 		const retrievalHit = q.expectedSource ? retrievedUrls.includes(q.expectedSource) : null;
@@ -102,7 +106,11 @@ export function computeMetrics(outcomes: EvalOutcome[]): EvalMetrics {
 	const modeCorrect = outcomes.filter((o) => o.modeCorrect).length;
 	const citationValid = outcomes.filter((o) => o.citationValid).length;
 
-	const byMode = { grounded: z(), fallback: z(), abstained: z() } as EvalMetrics['byMode'];
+	const byMode = {
+		grounded: zeroCounter(),
+		fallback: zeroCounter(),
+		abstained: zeroCounter()
+	} as EvalMetrics['byMode'];
 	for (const o of outcomes) {
 		byMode[o.expectedMode].total++;
 		if (o.modeCorrect) byMode[o.expectedMode].correct++;
@@ -121,7 +129,7 @@ export function computeMetrics(outcomes: EvalOutcome[]): EvalMetrics {
 	};
 }
 
-function z(): { total: number; correct: number } {
+function zeroCounter(): { total: number; correct: number } {
 	return { total: 0, correct: 0 };
 }
 
@@ -154,6 +162,7 @@ export function formatReport(report: EvalReport, title = 'RAG eval'): string {
 				o.citationValid ? `${o.citations.length} valid` : 'INVALID'
 			}`
 		);
+		if (o.note) lines.push(`    · ${o.note}`);
 	}
 	lines.push('─'.repeat(72));
 	lines.push(

@@ -6,47 +6,28 @@
 // scores abstained and a grounded one scores grounded+cited. All offline: no
 // network, no DATABASE_URL, no API key.
 import { afterAll, beforeAll, describe, it, expect } from 'vitest';
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { createClient, type Client } from '@libsql/client';
-import { applyMigrations } from '../../src/lib/server/db/migrator';
-import { makeFakeEmbedder } from '../embeddings';
 import { retrieve } from '../../src/lib/server/rag/retrieve';
 import { answer } from '../../src/lib/server/rag/answer';
 import { questions } from './questions';
-import { seedCorpus, makeGroundingFakeLlm } from './corpus';
+import { createFixtureDb, makeGroundingFakeLlm } from './corpus';
 import { runEval, computeMetrics, formatReport, type EvalReport } from './harness';
 
-const drizzleDir = fileURLToPath(new URL('../../drizzle/', import.meta.url));
-
-let tmp: string;
-let client: Client;
+let cleanup: () => void;
 let report: EvalReport;
 
 beforeAll(async () => {
-	tmp = mkdtempSync(join(tmpdir(), 'rag-eval-test-'));
-	client = createClient({ url: `file:${join(tmp, 'eval.db')}` });
-	const entries = readdirSync(drizzleDir)
-		.filter((f) => f.endsWith('.sql'))
-		.map((name) => ({ name, sql: readFileSync(join(drizzleDir, name), 'utf8') }));
-	await applyMigrations(client, entries);
-
-	const embedder = makeFakeEmbedder();
-	await seedCorpus(client, embedder);
-
+	const fixture = await createFixtureDb();
+	cleanup = fixture.cleanup;
 	report = await runEval(questions, {
 		retrieve,
 		answer,
-		retrieveOptions: { client, embedder, topK: 4 },
+		retrieveOptions: { client: fixture.client, embedder: fixture.embedder, topK: 4 },
 		answerOptions: { llm: makeGroundingFakeLlm() }
 	});
 });
 
 afterAll(() => {
-	client?.close();
-	if (tmp) rmSync(tmp, { recursive: true, force: true });
+	cleanup?.();
 });
 
 describe('eval harness', () => {

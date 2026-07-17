@@ -13,17 +13,11 @@
 //   --markdown           emit a Markdown report instead of the text one
 //   --strict             exit non-zero if any metric is below 100% (CI gate).
 //                        Off by default — the report is informational unless asked.
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { createClient, type Client } from '@libsql/client';
-import { applyMigrations } from '../../src/lib/server/db/migrator';
-import { makeFakeEmbedder, selectEmbedder } from '../embeddings';
+import { selectEmbedder } from '../embeddings';
 import { retrieve } from '../../src/lib/server/rag/retrieve';
 import { answer } from '../../src/lib/server/rag/answer';
 import { questions } from './questions';
-import { seedCorpus, makeGroundingFakeLlm } from './corpus';
+import { createFixtureDb, makeGroundingFakeLlm } from './corpus';
 import { runEval, formatReport, formatMarkdown, type RunEvalDeps } from './harness';
 
 interface CliOptions {
@@ -45,31 +39,17 @@ function parseArgs(argv: string[]): CliOptions {
 	};
 }
 
-/** Offline deps: temp DB + fixtures + fakes. Returns deps and a cleanup fn. */
+/** Offline deps: throwaway DB + fixtures + fakes. Returns deps and a cleanup fn. */
 async function offlineDeps(topK: number): Promise<{ deps: RunEvalDeps; cleanup: () => void }> {
-	const drizzleDir = fileURLToPath(new URL('../../drizzle/', import.meta.url));
-	const tmp = mkdtempSync(join(tmpdir(), 'rag-eval-'));
-	const client: Client = createClient({ url: `file:${join(tmp, 'eval.db')}` });
-	const entries = readdirSync(drizzleDir)
-		.filter((f) => f.endsWith('.sql'))
-		.map((name) => ({ name, sql: readFileSync(join(drizzleDir, name), 'utf8') }));
-	await applyMigrations(client, entries);
-
-	const embedder = makeFakeEmbedder();
-	await seedCorpus(client, embedder);
-	const llm = makeGroundingFakeLlm();
-
+	const { client, embedder, cleanup } = await createFixtureDb();
 	return {
 		deps: {
 			retrieve,
 			answer,
 			retrieveOptions: { client, embedder, topK },
-			answerOptions: { llm }
+			answerOptions: { llm: makeGroundingFakeLlm() }
 		},
-		cleanup: () => {
-			client.close();
-			rmSync(tmp, { recursive: true, force: true });
-		}
+		cleanup
 	};
 }
 
