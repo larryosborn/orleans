@@ -18,6 +18,7 @@ function serialize(r: SyncRun) {
 		id: r.id,
 		mode: r.mode,
 		status: r.status,
+		discoveryEnabled: r.discoveryEnabled,
 		requestsMade: r.requestsMade,
 		maxPages: r.maxPages,
 		pages: r.pages,

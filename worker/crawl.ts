@@ -260,13 +260,15 @@ export async function executeRun(run: SyncRun, opts: { publish?: boolean } = {})
 	}
 
 	let control: string = run.control;
+	// Live frontier-discovery switch, refreshed each heartbeat (see executeSync).
+	let discoveryEnabled = run.discoveryEnabled;
 	let lastBeat = 0;
 
 	async function beat(currentUrl: string | null): Promise<void> {
 		const nowMs = Date.now();
 		if (nowMs - lastBeat < HEARTBEAT_MS) return;
 		lastBeat = nowMs;
-		control = await writeHeartbeat(runId, currentUrl, stats);
+		({ control, discoveryEnabled } = await writeHeartbeat(runId, currentUrl, stats));
 	}
 
 	// Mark running.
@@ -367,10 +369,14 @@ export async function executeRun(run: SyncRun, opts: { publish?: boolean } = {})
 			stats,
 			writer
 		});
-		for (const t of targets) {
-			if (!seen.has(t)) {
-				queue.push(t);
-				stats.discovered++;
+		// Frontier discovery: only enqueue newly-discovered URLs while the switch is
+		// on. Off = keep draining what's already queued without growing the frontier.
+		if (discoveryEnabled) {
+			for (const t of targets) {
+				if (!seen.has(t)) {
+					queue.push(t);
+					stats.discovered++;
+				}
 			}
 		}
 
@@ -404,13 +410,16 @@ export async function executeSync(run: SyncRun, opts: { publish?: boolean } = {}
 	const robots = await Robots.load(BASE_URL);
 	const stats = zeroStats();
 	let control: string = run.control;
+	// Live frontier-discovery switch, refreshed each heartbeat. When false the loop
+	// still fetches/refreshes known resources but ingests no newly-discovered URLs.
+	let discoveryEnabled = run.discoveryEnabled;
 	let lastBeat = 0;
 
 	async function beat(currentUrl: string | null): Promise<void> {
 		const nowMs = Date.now();
 		if (nowMs - lastBeat < HEARTBEAT_MS) return;
 		lastBeat = nowMs;
-		control = await writeHeartbeat(runId, currentUrl, stats);
+		({ control, discoveryEnabled } = await writeHeartbeat(runId, currentUrl, stats));
 	}
 
 	/** Wait out a pause; returns false if the run was canceled. */
@@ -562,9 +571,14 @@ export async function executeSync(run: SyncRun, opts: { publish?: boolean } = {}
 				writer
 			});
 			await schedule(r.id, r.priority);
-			const fresh = discovered.filter((t) => !t.endsWith('sitemap.xml'));
-			await batchAll(fresh.map((t) => enqueueResourceStmt(t, runId)));
-			stats.discovered += fresh.length;
+			// Frontier discovery: enqueue newly-found in-scope URLs only while the
+			// switch is on. When off, the fetch/refresh above still runs (drain the
+			// known backlog) but no new URLs enter the frontier, so totals stop growing.
+			if (discoveryEnabled) {
+				const fresh = discovered.filter((t) => !t.endsWith('sitemap.xml'));
+				await batchAll(fresh.map((t) => enqueueResourceStmt(t, runId)));
+				stats.discovered += fresh.length;
+			}
 			await politeDelay();
 		}
 		if (control === 'cancel') break;
@@ -659,12 +673,14 @@ function backfillLinkTargets(): Promise<unknown> {
 	);
 }
 
-/** Write heartbeat + rollup counters; returns the current control flag. */
+/** Write heartbeat + rollup counters; returns the live steering flags (control +
+ *  whether frontier discovery is currently enabled) so the loop reacts without a
+ *  restart. */
 async function writeHeartbeat(
 	runId: string,
 	currentUrl: string | null,
 	stats: Stats
-): Promise<string> {
+): Promise<{ control: string; discoveryEnabled: boolean }> {
 	const [row] = await db
 		.update(syncRun)
 		.set({
@@ -685,8 +701,8 @@ async function writeHeartbeat(
 			bytesEstimated: stats.bytesEstimated
 		})
 		.where(eq(syncRun.id, runId))
-		.returning({ control: syncRun.control });
-	return row?.control ?? 'none';
+		.returning({ control: syncRun.control, discoveryEnabled: syncRun.discoveryEnabled });
+	return { control: row?.control ?? 'none', discoveryEnabled: row?.discoveryEnabled ?? true };
 }
 
 async function finalizeRun(runId: string, status: string, stats: Stats): Promise<void> {

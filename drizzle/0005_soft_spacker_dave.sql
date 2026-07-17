@@ -1,0 +1,1 @@
+ALTER TABLE `sync_run` ADD `discovery_enabled` integer DEFAULT true NOT NULL;
