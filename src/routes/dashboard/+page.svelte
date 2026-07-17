@@ -116,6 +116,21 @@
 
 	const maxStorage = $derived(Math.max(1, ...data.storage.map((s) => Number(s.bytes))));
 
+	// Storage & cache health (all derived from today's schema — no per-blob location).
+	const sh = $derived(data.storageHealth);
+	// Tallest age bucket, floored at 1 so an empty store scales to 0%-width bars
+	// (never a divide-by-zero).
+	const maxAgeBucket = $derived(Math.max(1, ...sh.ageBuckets.map((b) => b.count)));
+	// A health signal reads "bad" (destructive/amber) only when its count is nonzero;
+	// a clean store shows muted zeroes.
+	function healthVariant(
+		n: number,
+		tone: 'warn' | 'bad'
+	): 'default' | 'secondary' | 'destructive' | 'outline' {
+		if (n <= 0) return 'outline';
+		return tone === 'bad' ? 'destructive' : 'secondary';
+	}
+
 	function statusVariant(s: string): 'default' | 'secondary' | 'destructive' | 'outline' {
 		if (s === 'running') return 'default';
 		if (s === 'failed') return 'destructive';
@@ -167,6 +182,22 @@
 	{#each progress.byType as t (t.kind)}
 		{@render coverageBar(t.label, t.fetched, t.total, pctOf(t.fetched, t.total))}
 	{/each}
+{/snippet}
+
+{#snippet fig(label: string, value: string, sub?: string, tone?: string)}
+	<div>
+		<p class="text-muted-foreground">{label}</p>
+		<p class={`mt-0.5 text-lg font-semibold tabular-nums ${tone ?? ''}`}>{value}</p>
+		{#if sub}<p class="text-muted-foreground">{sub}</p>{/if}
+	</div>
+{/snippet}
+
+<!-- Thin proportional bar (storage & cache-health panel). `pct` is pre-clamped by
+     the caller against a floored max, so it's always 0–100. -->
+{#snippet miniBar(pct: number)}
+	<div class="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+		<div class="h-full rounded-full bg-primary/70" style="width:{pct}%"></div>
+	</div>
 {/snippet}
 
 {#snippet statusDetail(label: string, value: string)}
@@ -483,28 +514,100 @@
 	</div>
 
 	<div class="grid gap-6 lg:grid-cols-2">
-		<!-- Storage by type ---------------------------------------------- -->
+		<!-- Storage & cache health --------------------------------------- -->
+		<!-- Total size, by-content-type breakdown, cache age (from blob.createdAt),
+		     health signals, and the pending-publish backlog — all derived from
+		     today's schema (no per-blob backend/location column). -->
 		<Card.Root>
-			<Card.Header><Card.Title>Storage by content type</Card.Title></Card.Header>
-			<Card.Content class="space-y-2">
-				{#each data.storage as row (row.contentType)}
-					<div class="space-y-1">
-						<div class="flex justify-between text-xs">
-							<span class="truncate font-mono" title={row.contentType}>{row.contentType}</span>
-							<span class="text-muted-foreground">
-								{formatBytes(Number(row.bytes))} · {formatNumber(row.n)}
-							</span>
-						</div>
-						<div class="h-1.5 w-full overflow-hidden rounded-full bg-muted">
-							<div
-								class="h-full rounded-full bg-primary/70"
-								style="width:{Math.round((Number(row.bytes) / maxStorage) * 100)}%"
-							></div>
-						</div>
+			<Card.Header>
+				<div class="flex items-center justify-between">
+					<Card.Title>Storage &amp; cache health</Card.Title>
+					<span class="text-xs text-muted-foreground">derived from stored blobs</span>
+				</div>
+			</Card.Header>
+			<Card.Content class="space-y-4">
+				<!-- Headline figures -->
+				<div class="grid grid-cols-3 gap-2 text-xs">
+					{@render fig(
+						'Stored',
+						formatBytes(sh.storedBytes),
+						`${formatNumber(sh.blobObjects)} objects`
+					)}
+					{@render fig(
+						'Unpublished',
+						formatNumber(sh.unpublishedBlobs),
+						'awaiting R2',
+						sh.unpublishedBlobs > 0 ? 'text-amber-600 dark:text-amber-500' : undefined
+					)}
+					{@render fig(
+						'Cache span',
+						sh.oldestBlobAt != null ? formatRelative(sh.oldestBlobAt) : '—',
+						sh.newestBlobAt != null ? `newest ${formatRelative(sh.newestBlobAt)}` : 'no blobs yet'
+					)}
+				</div>
+
+				<!-- Cache-age distribution (blob.createdAt) -->
+				<div class="space-y-2">
+					<p class="text-xs font-medium">Cache age</p>
+					{#if sh.blobObjects > 0}
+						{#each sh.ageBuckets as bucket (bucket.label)}
+							<div class="space-y-1">
+								<div class="flex justify-between text-xs">
+									<span class="text-muted-foreground">{bucket.label}</span>
+									<span class="tabular-nums text-muted-foreground"
+										>{formatNumber(bucket.count)}</span
+									>
+								</div>
+								{@render miniBar(Math.round((bucket.count / maxAgeBucket) * 100))}
+							</div>
+						{/each}
+					{:else}
+						<p class="text-sm text-muted-foreground">No blobs stored yet.</p>
+					{/if}
+				</div>
+
+				<!-- Health signals -->
+				<div class="space-y-1.5">
+					<p class="text-xs font-medium">Health signals</p>
+					<div class="flex flex-wrap gap-2">
+						<Badge
+							variant={healthVariant(sh.stalePastDue, 'warn')}
+							title="Active resources whose refresh is due (past next_fetch_at)"
+						>
+							Stale past due: {formatNumber(sh.stalePastDue)}
+						</Badge>
+						<Badge
+							variant={healthVariant(sh.errorResources, 'bad')}
+							title="Resources in the error state"
+						>
+							Errors: {formatNumber(sh.errorResources)}
+						</Badge>
+						<Badge
+							variant={healthVariant(sh.goneResources, 'bad')}
+							title="Resources gone (404/410)"
+						>
+							Gone: {formatNumber(sh.goneResources)}
+						</Badge>
 					</div>
-				{:else}
-					<p class="text-sm text-muted-foreground">No data yet.</p>
-				{/each}
+				</div>
+
+				<!-- By content type (reuses getStorageByType) -->
+				<div class="space-y-2">
+					<p class="text-xs font-medium">By content type</p>
+					{#each data.storage as row (row.contentType)}
+						<div class="space-y-1">
+							<div class="flex justify-between text-xs">
+								<span class="truncate font-mono" title={row.contentType}>{row.contentType}</span>
+								<span class="text-muted-foreground">
+									{formatBytes(Number(row.bytes))} · {formatNumber(row.n)}
+								</span>
+							</div>
+							{@render miniBar(Math.round((Number(row.bytes) / maxStorage) * 100))}
+						</div>
+					{:else}
+						<p class="text-sm text-muted-foreground">No data yet.</p>
+					{/each}
+				</div>
 			</Card.Content>
 		</Card.Root>
 

@@ -111,6 +111,93 @@ export async function getRecentRuns(limit = 10) {
 	return db.select().from(syncRun).orderBy(desc(syncRun.requestedAt)).limit(limit);
 }
 
+/** One cache-age bucket: how many stored blobs fall into an age window (by
+ *  `blob.createdAt`, relative to now). Empty buckets are still returned so the
+ *  distribution renders a stable set of columns. */
+export interface CacheAgeBucket {
+	label: string;
+	count: number;
+}
+
+/** Storage + cache-health aggregates for the dashboard's storage panel. All
+ *  derived from today's schema — no per-blob backend/location column:
+ *  - stored size & object count come from the content-addressed `blob` table;
+ *  - cache age (oldest / newest / distribution) from `blob.createdAt`;
+ *  - `unpublishedBlobs` (r2_synced_at IS NULL) is the pending-publish backlog;
+ *  - health signals count resources stale past their refresh-due time plus the
+ *    error / gone lifecycle states.
+ *  Every field is coalesced/guarded so an empty DB reads as zeroes, never a
+ *  divide-by-zero or a null. */
+export interface StorageHealth {
+	storedBytes: number;
+	blobObjects: number;
+	unpublishedBlobs: number;
+	/** Epoch ms of the oldest / newest stored blob, or null when the store is empty. */
+	oldestBlobAt: number | null;
+	newestBlobAt: number | null;
+	/** Cache-age distribution over stored blobs (<1d / 1–7d / 7–30d / >30d). */
+	ageBuckets: CacheAgeBucket[];
+	/** Health signals. `stalePastDue`: active resources whose refresh is due
+	 *  (`nextFetchAt` <= now); `errorResources` / `goneResources`: lifecycle states. */
+	stalePastDue: number;
+	errorResources: number;
+	goneResources: number;
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+export async function getStorageHealth(): Promise<StorageHealth> {
+	const now = Date.now();
+	const d1 = now - DAY_MS;
+	const d7 = now - 7 * DAY_MS;
+	const d30 = now - 30 * DAY_MS;
+
+	// Blob store: totals, cache-age extremes, and the age distribution in one pass.
+	// createdAt is a timestamp_ms column, so it compares directly against epoch ms.
+	const [b] = await db
+		.select({
+			objects: count(),
+			storedBytes: sql<number>`coalesce(sum(${blob.sizeBytes}), 0)`,
+			oldest: sql<number | null>`min(${blob.createdAt})`,
+			newest: sql<number | null>`max(${blob.createdAt})`,
+			under1d: sql<number>`sum(case when ${blob.createdAt} >= ${d1} then 1 else 0 end)`,
+			d1to7: sql<number>`sum(case when ${blob.createdAt} < ${d1} and ${blob.createdAt} >= ${d7} then 1 else 0 end)`,
+			d7to30: sql<number>`sum(case when ${blob.createdAt} < ${d7} and ${blob.createdAt} >= ${d30} then 1 else 0 end)`,
+			over30d: sql<number>`sum(case when ${blob.createdAt} < ${d30} then 1 else 0 end)`
+		})
+		.from(blob);
+
+	// Pending-publish backlog — reuse the dedicated read model added by #26 rather
+	// than re-inlining the `r2_synced_at IS NULL` count.
+	const unpublishedBlobs = await getUnpublishedBlobCount();
+
+	// Health signals over resources: refresh-due backlog + error/gone lifecycle.
+	const [h] = await db
+		.select({
+			stalePastDue: sql<number>`sum(case when ${resource.state} = 'active' and ${resource.nextFetchAt} is not null and ${resource.nextFetchAt} <= ${now} then 1 else 0 end)`,
+			errorResources: sql<number>`sum(case when ${resource.state} = 'error' then 1 else 0 end)`,
+			goneResources: sql<number>`sum(case when ${resource.state} = 'gone' then 1 else 0 end)`
+		})
+		.from(resource);
+
+	return {
+		storedBytes: Number(b?.storedBytes ?? 0),
+		blobObjects: b?.objects ?? 0,
+		unpublishedBlobs,
+		oldestBlobAt: b?.oldest != null ? Number(b.oldest) : null,
+		newestBlobAt: b?.newest != null ? Number(b.newest) : null,
+		ageBuckets: [
+			{ label: '< 1d', count: Number(b?.under1d ?? 0) },
+			{ label: '1–7d', count: Number(b?.d1to7 ?? 0) },
+			{ label: '7–30d', count: Number(b?.d7to30 ?? 0) },
+			{ label: '> 30d', count: Number(b?.over30d ?? 0) }
+		],
+		stalePastDue: Number(h?.stalePastDue ?? 0),
+		errorResources: Number(h?.errorResources ?? 0),
+		goneResources: Number(h?.goneResources ?? 0)
+	};
+}
+
 /** One coverage bucket for a resource `kind` (page / document / sitemap / other):
  *  how many of that kind have been fetched vs discovered. `kind` is assigned at
  *  discovery time (independent of fetch), so `total` is a stable denominator — unlike

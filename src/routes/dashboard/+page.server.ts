@@ -11,6 +11,7 @@ export const load: PageServerLoad = async () => {
 		events,
 		eventCounts,
 		storage,
+		storageHealth,
 		feed,
 		progress,
 		processing
@@ -22,6 +23,7 @@ export const load: PageServerLoad = async () => {
 		sync.getEvents({ limit: 10 }),
 		sync.getEventCounts(),
 		sync.getStorageByType(),
+		sync.getStorageHealth(),
 		sync.getChangeFeed(10),
 		sync.getSyncProgress(),
 		sync.getProcessingRecords()
@@ -38,6 +40,7 @@ export const load: PageServerLoad = async () => {
 		events,
 		eventCounts,
 		storage,
+		storageHealth,
 		feed,
 		progress,
 		processing
