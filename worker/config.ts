@@ -112,7 +112,15 @@ export const SYNC_SCHEDULE_MS = Number(process.env.SYNC_SCHEDULE_MINUTES ?? 0) *
 
 // A run whose heartbeat is older than this is considered dead and reaped, so a
 // crashed worker doesn't leave a `running` row blocking the schedule forever.
+// Also the sweep threshold for the worker registry: a worker row not refreshed
+// within this window is dropped (see sweepStaleWorkers in worker/index.ts).
 export const STALE_RUN_MS = Number(process.env.WORKER_STALE_MINUTES ?? 5) * 60_000;
+
+// A running run that keeps heartbeating but whose forward-progress counter hasn't
+// advanced for this long is flagged "stalled" on the dashboard. WARNING ONLY —
+// the worker never auto-fails a run on a stall. Read-model concern only (the
+// dashboard derives the flag); the worker just records the progress marker.
+export const PROGRESS_STALL_MS = Number(process.env.WORKER_STALL_MINUTES ?? 3) * 60_000;
 
 // ---------------------------------------------------------------------------
 // Embedding pipeline (mode = "embed"): chunking + embedding knobs. The vector

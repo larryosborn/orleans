@@ -10,7 +10,8 @@ import {
 	link,
 	resource,
 	resourceVersion,
-	syncRun
+	syncRun,
+	worker
 } from '../src/lib/server/db/schema';
 import type { SyncRun } from '../src/lib/server/db/crawl.schema';
 import { makeBlobWriter, type BlobWriter } from './storage';
@@ -263,18 +264,33 @@ export async function executeRun(run: SyncRun, opts: { publish?: boolean } = {})
 	// Live frontier-discovery switch, refreshed each heartbeat (see executeSync).
 	let discoveryEnabled = run.discoveryEnabled;
 	let lastBeat = 0;
+	// Forward-progress watermark for the stall marker: the last requestsMade value
+	// we recorded a progress bump for. -1 so the first beat always initializes it.
+	let lastProgress = -1;
+	const workerId = run.workerId;
 
 	async function beat(currentUrl: string | null): Promise<void> {
 		const nowMs = Date.now();
 		if (nowMs - lastBeat < HEARTBEAT_MS) return;
 		lastBeat = nowMs;
-		({ control, discoveryEnabled } = await writeHeartbeat(runId, currentUrl, stats));
+		const progressAdvanced = stats.requestsMade > lastProgress;
+		if (progressAdvanced) lastProgress = stats.requestsMade;
+		({ control, discoveryEnabled } = await writeHeartbeat(runId, currentUrl, stats, {
+			workerId,
+			phase: 'crawling',
+			progressAdvanced
+		}));
 	}
 
-	// Mark running.
+	// Mark running. Seed progress_at so a run is never "stalled" before its first beat.
 	await db
 		.update(syncRun)
-		.set({ status: 'running', startedAt: new Date(), currentPhase: 'crawling' })
+		.set({
+			status: 'running',
+			startedAt: new Date(),
+			currentPhase: 'crawling',
+			progressAt: new Date()
+		})
 		.where(eq(syncRun.id, runId));
 
 	while (queue.length > 0 && stats.requestsMade < maxPages) {
@@ -414,12 +430,21 @@ export async function executeSync(run: SyncRun, opts: { publish?: boolean } = {}
 	// still fetches/refreshes known resources but ingests no newly-discovered URLs.
 	let discoveryEnabled = run.discoveryEnabled;
 	let lastBeat = 0;
+	// Forward-progress watermark for the stall marker (see executeRun.beat).
+	let lastProgress = -1;
+	const workerId = run.workerId;
 
 	async function beat(currentUrl: string | null): Promise<void> {
 		const nowMs = Date.now();
 		if (nowMs - lastBeat < HEARTBEAT_MS) return;
 		lastBeat = nowMs;
-		({ control, discoveryEnabled } = await writeHeartbeat(runId, currentUrl, stats));
+		const progressAdvanced = stats.requestsMade > lastProgress;
+		if (progressAdvanced) lastProgress = stats.requestsMade;
+		({ control, discoveryEnabled } = await writeHeartbeat(runId, currentUrl, stats, {
+			workerId,
+			phase: 'sync',
+			progressAdvanced
+		}));
 	}
 
 	/** Wait out a pause; returns false if the run was canceled. */
@@ -443,9 +468,10 @@ export async function executeSync(run: SyncRun, opts: { publish?: boolean } = {}
 			.set({ nextFetchAt: new Date(Date.now() + ttlFor(priority)) })
 			.where(eq(resource.id, id));
 
+	// Mark running. Seed progress_at so a run is never "stalled" before its first beat.
 	await db
 		.update(syncRun)
-		.set({ status: 'running', startedAt: new Date(), currentPhase: 'sync' })
+		.set({ status: 'running', startedAt: new Date(), currentPhase: 'sync', progressAt: new Date() })
 		.where(eq(syncRun.id, runId));
 
 	// Backfill: give any legacy rows a priority tier (they were all default 1).
@@ -681,16 +707,37 @@ function backfillLinkTargets(): Promise<unknown> {
 
 /** Write heartbeat + rollup counters; returns the live steering flags (control +
  *  whether frontier discovery is currently enabled) so the loop reacts without a
- *  restart. */
+ *  restart.
+ *
+ *  Two extra jobs ride on the heartbeat (both dashboard health signals, neither
+ *  affecting the crawl):
+ *  - `progressAdvanced` bumps `sync_run.progress_at` ONLY when a forward-progress
+ *    counter moved this beat; a run that keeps beating with this frozen is the
+ *    "stalled" signal (a warning — never an auto-fail).
+ *  - `worker`/`phase` refresh the active worker's registry row, so a long run
+ *    never lets its last-seen go stale and get swept by another worker. */
 async function writeHeartbeat(
 	runId: string,
 	currentUrl: string | null,
-	stats: Stats
+	stats: Stats,
+	ctx: { workerId: string | null; phase: string; progressAdvanced: boolean }
 ): Promise<{ control: string; discoveryEnabled: boolean }> {
+	const now = new Date();
+	if (ctx.workerId) {
+		// Best-effort registry refresh — a failure here must never break crawling.
+		await db
+			.update(worker)
+			.set({ role: 'active', runId, phase: ctx.phase, lastSeenAt: now })
+			.where(eq(worker.id, ctx.workerId))
+			.catch(() => {});
+	}
 	const [row] = await db
 		.update(syncRun)
 		.set({
-			heartbeatAt: new Date(),
+			heartbeatAt: now,
+			// Bump the progress marker only on a beat that actually advanced, so a
+			// stuck-but-heartbeating run leaves progress_at behind (→ stalled).
+			...(ctx.progressAdvanced ? { progressAt: now } : {}),
 			currentUrl,
 			requestsMade: stats.requestsMade,
 			pages: stats.pages,

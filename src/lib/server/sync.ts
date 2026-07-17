@@ -1,9 +1,17 @@
 // Server-side control plane + read models for the sync dashboard. The web app
 // never talks to the worker directly: it enqueues sync_run rows and writes the
 // `control` column; the worker polls, executes, and writes back progress here.
-import { and, count, desc, eq, inArray, isNotNull, isNull, like, or, sql } from 'drizzle-orm';
+import { and, asc, count, desc, eq, inArray, isNotNull, isNull, like, or, sql } from 'drizzle-orm';
 import { db } from '$lib/server/db';
-import { blob, crawlEvent, link, resource, resourceVersion, syncRun } from '$lib/server/db/schema';
+import {
+	blob,
+	crawlEvent,
+	link,
+	resource,
+	resourceVersion,
+	syncRun,
+	worker
+} from '$lib/server/db/schema';
 
 export type SyncMode = 'sync' | 'estimate' | 'crawl' | 'recrawl';
 export type ControlAction = 'pause' | 'resume' | 'cancel';
@@ -57,6 +65,123 @@ export async function getActiveRun() {
 		.orderBy(desc(syncRun.requestedAt))
 		.limit(1);
 	return row ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// Worker health
+// ---------------------------------------------------------------------------
+// Thresholds, derived from the same env vars the worker uses (kept here rather
+// than imported so the app/worker boundary stays a Turso-only contract):
+//   - WORKER_STALE_MINUTES  — a registry row not refreshed within this window is
+//     dead (the worker sweeps it; the read model stops counting it as live).
+//   - WORKER_STALL_MINUTES  — a running run still heartbeating but whose
+//     progress marker hasn't advanced this long is "stalled" (a warning).
+// HEARTBEAT_STALE_MS mirrors the dashboard chip's own 30s heartbeat window.
+const WORKER_STALE_MS = Number(process.env.WORKER_STALE_MINUTES ?? 5) * 60_000;
+const PROGRESS_STALL_MS = Number(process.env.WORKER_STALL_MINUTES ?? 3) * 60_000;
+const HEARTBEAT_STALE_MS = 30_000;
+
+export interface WorkerEntry {
+	id: string;
+	host: string;
+	pid: number;
+	role: 'active' | 'standby';
+	runId: string | null;
+	phase: string | null;
+	/** Epoch ms; null only for a malformed row. */
+	startedAt: number | null;
+	lastSeenAt: number | null;
+	uptimeMs: number;
+	lastSeenAgeMs: number;
+	/** Last-seen older than the stale window — awaiting the sweep, not counted live. */
+	stale: boolean;
+}
+
+/** Derived worker-health flags for the dashboard. All warnings — none of them
+ *  change worker behavior (the worker never auto-fails on any of these). */
+export interface WorkerFlags {
+	/** An active run exists but no live worker holds the active role (unclaimed
+	 *  queue, or the claiming worker vanished). */
+	noActiveWorker: boolean;
+	/** The active run is running/paused but its heartbeat has gone stale. */
+	staleHeartbeat: boolean;
+	/** The active run is running with a FRESH heartbeat but its progress marker
+	 *  hasn't advanced for PROGRESS_STALL_MS — heartbeating but stuck. */
+	stalled: boolean;
+	/** More than one live worker claims the active role — the single-writer guard
+	 *  should make this impossible, so it's surfaced as an anomaly. */
+	multipleActive: boolean;
+}
+
+export interface WorkerHealth {
+	/** The live-plus-recently-seen worker set, active first then by start time. */
+	workers: WorkerEntry[];
+	activeCount: number;
+	standbyCount: number;
+	staleThresholdMs: number;
+	stallThresholdMs: number;
+	flags: WorkerFlags;
+}
+
+/** Read model for the worker-health area of the sync-status card: the process
+ *  registry (roles, uptime, last-seen age, phase) plus the derived health flags.
+ *  Standby count is reported but is NOT itself an alert. */
+export async function getWorkerHealth(): Promise<WorkerHealth> {
+	const now = Date.now();
+	const rows = await db.select().from(worker).orderBy(asc(worker.role), asc(worker.startedAt)); // 'active' < 'standby'
+	const workers: WorkerEntry[] = rows.map((w) => {
+		const startedAt = w.startedAt?.getTime() ?? null;
+		const lastSeenAt = w.lastSeenAt?.getTime() ?? null;
+		const lastSeenAgeMs = lastSeenAt != null ? now - lastSeenAt : Infinity;
+		return {
+			id: w.id,
+			host: w.host,
+			pid: w.pid,
+			role: w.role === 'active' ? 'active' : 'standby',
+			runId: w.runId,
+			phase: w.phase,
+			startedAt,
+			lastSeenAt,
+			uptimeMs: startedAt != null ? now - startedAt : 0,
+			lastSeenAgeMs,
+			stale: lastSeenAgeMs > WORKER_STALE_MS
+		};
+	});
+
+	// Only fresh rows count toward the live tallies; a just-died worker lingers in
+	// the list (shown stale) until the sweep drops it, but isn't counted live.
+	const live = workers.filter((w) => !w.stale);
+	const activeCount = live.filter((w) => w.role === 'active').length;
+	const standbyCount = live.filter((w) => w.role === 'standby').length;
+
+	// Run-based signals need the active run's heartbeat + progress marker.
+	const active = await getActiveRun();
+	const isRunning = !!active && (active.status === 'running' || active.status === 'paused');
+	const beatMs = active?.heartbeatAt?.getTime() ?? null;
+	const heartbeatFresh = beatMs != null && now - beatMs <= HEARTBEAT_STALE_MS;
+	const progressMs = active?.progressAt?.getTime() ?? null;
+
+	const flags: WorkerFlags = {
+		noActiveWorker: !!active && activeCount === 0,
+		staleHeartbeat: isRunning && (beatMs == null || now - beatMs > HEARTBEAT_STALE_MS),
+		// Warning only — never auto-fails the run.
+		stalled:
+			!!active &&
+			active.status === 'running' &&
+			heartbeatFresh &&
+			progressMs != null &&
+			now - progressMs > PROGRESS_STALL_MS,
+		multipleActive: activeCount > 1
+	};
+
+	return {
+		workers,
+		activeCount,
+		standbyCount,
+		staleThresholdMs: WORKER_STALE_MS,
+		stallThresholdMs: PROGRESS_STALL_MS,
+		flags
+	};
 }
 
 // ---------------------------------------------------------------------------

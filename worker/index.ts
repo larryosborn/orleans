@@ -10,11 +10,12 @@
 // Publishing is opt-in: without --publish the worker holds blobs in the LOCAL
 // backend only (r2_synced_at null); with --publish it writes through to R2 (the
 // canonical archive) and stamps r2_synced_at. Prod runs pass --publish.
+import { hostname } from 'node:os';
 import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { and, asc, desc, eq, gt, inArray, lt } from 'drizzle-orm';
 import { client, db } from './db';
-import { syncRun } from '../src/lib/server/db/schema';
+import { syncRun, worker } from '../src/lib/server/db/schema';
 import type { SyncRun } from '../src/lib/server/db/crawl.schema';
 import { applyMigrations } from '../src/lib/server/db/migrator';
 import { SYNC_SCHEDULE_MS, STALE_RUN_MS } from './config';
@@ -22,7 +23,8 @@ import { executeRun, executeSync } from './crawl';
 import { executeExtract } from './extract';
 import { executeEmbed } from './embed';
 
-const WORKER_ID = `${process.env.HOSTNAME ?? 'worker'}-${process.pid}-${crypto.randomUUID().slice(0, 8)}`;
+const WORKER_HOST = process.env.HOSTNAME ?? hostname();
+const WORKER_ID = `${WORKER_HOST}-${process.pid}-${crypto.randomUUID().slice(0, 8)}`;
 const POLL_INTERVAL_MS = 3000;
 const MAINTENANCE_INTERVAL_MS = 30_000;
 const ACTIVE = ['queued', 'running', 'paused'] as const;
@@ -129,6 +131,59 @@ async function reapStaleRuns(): Promise<void> {
 	if (reaped.length) console.log(`reaped ${reaped.length} stale run(s)`);
 }
 
+/** Upsert this process's registry row (identity + role + last-seen). Called from
+ *  the maintenance tick (as a standby refresh) and on each claim/standby/finish
+ *  transition, so the live worker set is observable even though the single-writer
+ *  guard keeps standbys from touching any run row. The active worker additionally
+ *  refreshes this row on every crawl heartbeat (see writeHeartbeat), so a long run
+ *  never lets its last-seen go stale and get swept. Best-effort: a registry write
+ *  failing must never disturb crawling. */
+async function registerWorker(
+	role: 'active' | 'standby',
+	runId: string | null,
+	phase: string | null
+): Promise<void> {
+	try {
+		const now = new Date();
+		await db
+			.insert(worker)
+			.values({
+				id: WORKER_ID,
+				host: WORKER_HOST,
+				pid: process.pid,
+				role,
+				runId,
+				phase,
+				lastSeenAt: now
+			})
+			.onConflictDoUpdate({ target: worker.id, set: { role, runId, phase, lastSeenAt: now } });
+	} catch (e) {
+		console.error('worker registry upsert failed:', e instanceof Error ? e.message : e);
+	}
+}
+
+/** Drop registry rows whose last-seen is older than the stale threshold — an
+ *  exited/killed worker (no graceful self-removal) leaves the live set here. Uses
+ *  the same STALE_RUN_MS window as reapStaleRuns, so a dead worker and its
+ *  abandoned run age out together. */
+async function sweepStaleWorkers(): Promise<void> {
+	const swept = await db
+		.delete(worker)
+		.where(lt(worker.lastSeenAt, new Date(Date.now() - STALE_RUN_MS)))
+		.returning({ id: worker.id });
+	if (swept.length) console.log(`swept ${swept.length} stale worker registration(s)`);
+}
+
+/** Best-effort self-removal so a graceful shutdown leaves the live set promptly
+ *  (a hard kill is handled by sweepStaleWorkers instead). */
+async function deregisterWorker(): Promise<void> {
+	try {
+		await db.delete(worker).where(eq(worker.id, WORKER_ID));
+	} catch {
+		/* best-effort — the sweep will drop it within STALE_RUN_MS regardless */
+	}
+}
+
 /** Auto-schedule: enqueue a `sync` run when enabled, idle, and one is due. */
 async function maybeScheduleSync(): Promise<void> {
 	if (SYNC_SCHEDULE_MS <= 0) return;
@@ -159,12 +214,23 @@ async function pollLoop(publish: boolean): Promise<void> {
 		if (Date.now() - lastMaintenance > MAINTENANCE_INTERVAL_MS) {
 			lastMaintenance = Date.now();
 			await reapStaleRuns();
+			await sweepStaleWorkers();
+			// Refresh this process's registry row. Between jobs a worker is a standby
+			// (idle or standing down behind the single-writer guard); the active role is
+			// stamped on claim + each crawl heartbeat, so this refresh is always standby.
+			await registerWorker('standby', null, null);
 			await maybeScheduleSync();
 		}
 		const run = await claimNext();
-		if (run) await runOne(run, publish);
-		else await Bun.sleep(POLL_INTERVAL_MS);
+		if (run) {
+			// Flip to active immediately (the crawl heartbeat keeps it fresh mid-run),
+			// then back to standby when the run returns.
+			await registerWorker('active', run.id, run.currentPhase ?? null);
+			await runOne(run, publish);
+			await registerWorker('standby', null, null);
+		} else await Bun.sleep(POLL_INTERVAL_MS);
 	}
+	await deregisterWorker();
 	console.log('stopped.');
 }
 

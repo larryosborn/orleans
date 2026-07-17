@@ -14,7 +14,8 @@ export const load: PageServerLoad = async () => {
 		storageHealth,
 		feed,
 		progress,
-		processing
+		processing,
+		workerHealth
 	] = await Promise.all([
 		sync.getOverview(),
 		sync.getActiveRun(),
@@ -26,7 +27,8 @@ export const load: PageServerLoad = async () => {
 		sync.getStorageHealth(),
 		sync.getChangeFeed(10),
 		sync.getSyncProgress(),
-		sync.getProcessingRecords()
+		sync.getProcessingRecords(),
+		sync.getWorkerHealth()
 	]);
 
 	// The worker-health hint (is anything actually processing this run?) is derived
@@ -43,7 +45,8 @@ export const load: PageServerLoad = async () => {
 		storageHealth,
 		feed,
 		progress,
-		processing
+		processing,
+		workerHealth
 	};
 };
 

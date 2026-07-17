@@ -18,7 +18,14 @@ import { Readability } from '@mozilla/readability';
 import { parseHTML } from 'linkedom';
 import { extractText as pdfExtractText, getDocumentProxy } from 'unpdf';
 import { db } from './db';
-import { blob, crawlEvent, resource, resourceText, syncRun } from '../src/lib/server/db/schema';
+import {
+	blob,
+	crawlEvent,
+	resource,
+	resourceText,
+	syncRun,
+	worker
+} from '../src/lib/server/db/schema';
 import type { ExtractionStatus, SyncRun } from '../src/lib/server/db/crawl.schema';
 import { localDir, makeLocalStorage, makeR2Storage } from './storage';
 
@@ -192,6 +199,15 @@ export async function executeExtract(run: SyncRun): Promise<void> {
 		const nowMs = Date.now();
 		if (nowMs - lastBeat < HEARTBEAT_MS) return;
 		lastBeat = nowMs;
+		// Keep the active worker's registry row fresh so a long extract run isn't
+		// swept from the live set (best-effort — must not disturb extraction).
+		if (run.workerId) {
+			await db
+				.update(worker)
+				.set({ role: 'active', runId, phase: 'extracting', lastSeenAt: new Date() })
+				.where(eq(worker.id, run.workerId))
+				.catch(() => {});
+		}
 		const [row] = await db
 			.update(syncRun)
 			.set({ heartbeatAt: new Date(), currentUrl })

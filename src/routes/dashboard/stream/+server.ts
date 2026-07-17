@@ -70,6 +70,7 @@ export const GET: RequestHandler = async ({ locals, request }) => {
 			let lastAgg = 0;
 			let agg: sync.SyncProgress | null = null;
 			let processing: sync.ProcessingPanel | null = null;
+			let workerHealth: sync.WorkerHealth | null = null;
 			const tick = async () => {
 				try {
 					const active = await sync.getActiveRun();
@@ -77,15 +78,19 @@ export const GET: RequestHandler = async ({ locals, request }) => {
 					if (Date.now() - lastAgg >= AGG_MS) {
 						lastAgg = Date.now();
 						fresh = true;
-						[agg, processing] = await Promise.all([
+						[agg, processing, workerHealth] = await Promise.all([
 							sync.getSyncProgress(),
-							sync.getProcessingRecords()
+							sync.getProcessingRecords(),
+							sync.getWorkerHealth()
 						]);
 					}
 					send('progress', {
 						run: active ? serialize(active) : null,
 						progress: agg,
-						processing: fresh ? processing : undefined
+						processing: fresh ? processing : undefined,
+						// Included only on the refreshed ticks; the client keeps its last copy
+						// otherwise (same cadence rationale as `processing`).
+						workerHealth: fresh ? workerHealth : undefined
 					});
 				} catch {
 					// transient DB error — next tick retries
