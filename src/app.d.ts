@@ -7,6 +7,9 @@ declare global {
 		interface Locals {
 			user?: User;
 			session?: Session;
+			/** Per-request correlation id, set in hooks.server.ts and bound onto the
+			 *  request logger; available to downstream loads/actions for correlation. */
+			requestId: string;
 		}
 
 		// interface Error {}
