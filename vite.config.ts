@@ -69,7 +69,9 @@ export default defineConfig({
 				test: {
 					name: 'server',
 					environment: 'node',
-					include: ['src/**/*.{test,spec}.{js,ts}'],
+					// worker/ is a standalone Bun process (no package.json of its own); its
+					// node-side unit tests run in this server project too.
+					include: ['src/**/*.{test,spec}.{js,ts}', 'worker/**/*.{test,spec}.{js,ts}'],
 					exclude: ['src/**/*.svelte.{test,spec}.{js,ts}']
 				}
 			},

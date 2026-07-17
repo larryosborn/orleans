@@ -33,6 +33,16 @@ Defined in `crawl.schema.ts`:
 - **`sync_run`** — per-run status, `control` flag, heartbeat, and rollup counters;
   the control plane between app and worker.
 - **`crawl_event`** — per-URL errors/events for the dashboard.
+- **`resource_text`** — cleaned, extracted main-content plain text per resource
+  (RAG stage 1). Content-addressed by `sha256`; `status` ∈ ok | empty | scanned |
+  unsupported. Written by the worker's `extract` mode.
+- **`chunk`** — retrieval-sized text chunks of `resource_text` (with char offsets)
+  plus an embedding vector in a libSQL-native `F32_BLOB(768)` column and an ANN
+  index (`chunk_vec_idx`) for `vector_top_k` (RAG stage 2). Denormalizes
+  `url`/`title`/`kind` for filter + attribution. Written by the worker's `embed`
+  mode; re-embedded per resource when its extracted text changes. The ANN index is
+  raw SQL in the migration (it can't be expressed in Drizzle) — keep it in sync
+  with the `chunk.embedding` column.
 
 Read models + control helpers live in [`../sync.ts`](../sync.ts).
 

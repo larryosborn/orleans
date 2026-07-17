@@ -27,6 +27,7 @@
 		"worker": "bun run worker/index.ts",
 		"worker:estimate": "bun run worker/index.ts --mode estimate --once",
 		"worker:extract": "bun run worker/index.ts --mode extract --once",
+		"worker:embed": "bun run worker/index.ts --mode embed --once",
 		"blobs:sync": "bun run worker/sync-blobs.ts --both",
 		"blobs:push": "bun run worker/sync-blobs.ts --push",
 		"blobs:pull": "bun run worker/sync-blobs.ts --pull",

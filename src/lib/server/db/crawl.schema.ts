@@ -1,5 +1,12 @@
 import { sql } from 'drizzle-orm';
-import { sqliteTable, text, integer, index, uniqueIndex } from 'drizzle-orm/sqlite-core';
+import {
+	customType,
+	sqliteTable,
+	text,
+	integer,
+	index,
+	uniqueIndex
+} from 'drizzle-orm/sqlite-core';
 
 // Shared default: current time in epoch milliseconds, matching the auth schema.
 const nowMs = sql`(cast(unixepoch('subsecond') * 1000 as integer))`;
@@ -151,6 +158,88 @@ export const resourceText = sqliteTable(
 );
 
 // ---------------------------------------------------------------------------
+// chunk — stage 2 of the RAG pipeline (#35). Each `resource_text` (status `ok`)
+// is split into retrieval-sized pieces; every piece is embedded and stored here
+// with its vector in a libSQL-native F32_BLOB column, so retrieval (#36) can run
+// approximate-nearest-neighbour search with `vector_top_k` over `chunk_vec_idx`.
+//
+// `embedding` is a fixed-width float32 vector (see EMBED_DIM). It's stored as raw
+// little-endian float32 bytes — byte-identical to what libSQL's `vector32()`
+// produces — so `vector_top_k` / `vector_distance_cos` work directly on it. The
+// `f32Blob` custom type maps `number[]` (app side) ↔ those bytes (driver side).
+//
+// Freshness is content-addressed like `resource_text`: `source_sha` is the
+// `resource_text.sha256` these chunks were built from. Chunks are (re)built when
+// that no longer matches the resource's current extracted-text sha, and a
+// resource's chunks are deleted wholesale before rebuilding — so a content change
+// leaves no orphan/stale chunks. `url` / `title` / `kind` are denormalized off
+// `resource` so retrieval can filter + attribute a hit without a join.
+//
+// NOTE: the ANN index itself (`libsql_vector_idx(embedding)`) can't be expressed
+// in Drizzle; it's created as raw SQL in the generated migration. Keep them in
+// sync — see drizzle/*_*.sql for the `chunk_vec_idx` statement.
+// ---------------------------------------------------------------------------
+
+/** Dimensionality of stored embedding vectors, fixed at the F32_BLOB column
+ *  width. The configured embedding model MUST emit this many dims: `bge-base` is
+ *  768 natively; OpenAI `text-embedding-3-small` is requested with
+ *  `dimensions: 768`; the deterministic fake embedder matches it. Changing this
+ *  requires a new migration — libSQL vector columns are fixed-width. */
+export const EMBED_DIM = 768;
+
+/** libSQL-native float32 vector column. Presents as `number[]` in TypeScript and
+ *  is stored as raw little-endian float32 bytes (the F32_BLOB wire format). */
+const f32Blob = customType<{
+	data: number[];
+	driverData: Uint8Array;
+	config: { dimensions: number };
+}>({
+	dataType(config) {
+		return `F32_BLOB(${config?.dimensions ?? EMBED_DIM})`;
+	},
+	toDriver(value: number[]): Uint8Array {
+		const f = Float32Array.from(value);
+		return new Uint8Array(f.buffer, f.byteOffset, f.byteLength);
+	},
+	fromDriver(value: Uint8Array): number[] {
+		// libSQL hands back the blob as a Uint8Array/Buffer; decode to float32s.
+		const bytes =
+			value instanceof Uint8Array ? value : new Uint8Array(value as unknown as ArrayBuffer);
+		const copy = bytes.slice(); // ensure a 4-byte-aligned, standalone buffer
+		return Array.from(new Float32Array(copy.buffer, copy.byteOffset, copy.byteLength / 4));
+	}
+});
+
+export const chunk = sqliteTable(
+	'chunk',
+	{
+		id: text('id').primaryKey().$defaultFn(uuid),
+		resourceId: text('resource_id')
+			.notNull()
+			.references(() => resource.id, { onDelete: 'cascade' }),
+		// resource_text.sha256 these chunks were built from — the freshness key.
+		sourceSha: text('source_sha').notNull(),
+		chunkIndex: integer('chunk_index').notNull(), // 0-based order within the resource
+		text: text('text').notNull(),
+		// char offsets into the source resource_text.text (attribution / re-slicing).
+		charStart: integer('char_start').notNull(),
+		charEnd: integer('char_end').notNull(),
+		embedding: f32Blob('embedding', { dimensions: EMBED_DIM }).notNull(),
+		embedder: text('embedder'), // provenance: which model produced the vector
+		// denormalized resource metadata for filter + attribution without a join.
+		url: text('url').notNull(),
+		title: text('title'),
+		kind: text('kind').notNull(),
+		createdAt: integer('created_at', { mode: 'timestamp_ms' }).default(nowMs).notNull()
+	},
+	(t) => [
+		index('chunk_resource_idx').on(t.resourceId),
+		index('chunk_source_sha_idx').on(t.sourceSha),
+		uniqueIndex('chunk_resource_index_unique').on(t.resourceId, t.chunkIndex)
+	]
+);
+
+// ---------------------------------------------------------------------------
 // link — the discovered relation graph (who links to what). `to_resource_id`
 // is backfilled when the target URL becomes a known resource; `to_url` always
 // holds the raw normalized target so nothing is lost before that.
@@ -245,6 +334,7 @@ export type ExtractionStatus = 'ok' | 'empty' | 'scanned' | 'unsupported';
 export type Resource = typeof resource.$inferSelect;
 export type ResourceVersion = typeof resourceVersion.$inferSelect;
 export type ResourceText = typeof resourceText.$inferSelect;
+export type Chunk = typeof chunk.$inferSelect;
 export type Blob = typeof blob.$inferSelect;
 export type Link = typeof link.$inferSelect;
 export type SyncRun = typeof syncRun.$inferSelect;
