@@ -10,8 +10,7 @@ import {
 	link,
 	resource,
 	resourceVersion,
-	syncRun,
-	worker
+	syncRun
 } from '../src/lib/server/db/schema';
 import type { SyncRun } from '../src/lib/server/db/crawl.schema';
 import { makeBlobWriter, type BlobWriter } from './storage';
@@ -43,6 +42,7 @@ import {
 	Robots,
 	sha256Hex
 } from './http';
+import { refreshActiveWorker } from './registry';
 
 const HEARTBEAT_MS = 2000;
 
@@ -723,14 +723,8 @@ async function writeHeartbeat(
 	ctx: { workerId: string | null; phase: string; progressAdvanced: boolean }
 ): Promise<{ control: string; discoveryEnabled: boolean }> {
 	const now = new Date();
-	if (ctx.workerId) {
-		// Best-effort registry refresh — a failure here must never break crawling.
-		await db
-			.update(worker)
-			.set({ role: 'active', runId, phase: ctx.phase, lastSeenAt: now })
-			.where(eq(worker.id, ctx.workerId))
-			.catch(() => {});
-	}
+	// Keep the active worker's registry row fresh (best-effort; see registry.ts).
+	await refreshActiveWorker(ctx.workerId, runId, ctx.phase);
 	const [row] = await db
 		.update(syncRun)
 		.set({

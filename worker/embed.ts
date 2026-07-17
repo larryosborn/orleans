@@ -12,18 +12,12 @@
 // its chunks removed too. So a re-run over unchanged content does no work.
 import { and, asc, eq, gt, or, sql } from 'drizzle-orm';
 import { db } from './db';
-import {
-	chunk,
-	crawlEvent,
-	resource,
-	resourceText,
-	syncRun,
-	worker
-} from '../src/lib/server/db/schema';
+import { chunk, crawlEvent, resource, resourceText, syncRun } from '../src/lib/server/db/schema';
 import type { SyncRun } from '../src/lib/server/db/crawl.schema';
 import { EMBED_BATCH } from './config';
 import { chunkText } from './chunk';
 import { selectEmbedder, type Embedder } from './embeddings';
+import { refreshActiveWorker } from './registry';
 
 const HEARTBEAT_MS = 2000;
 const BATCH = 200; // resources per DB round-trip
@@ -114,13 +108,7 @@ export async function executeEmbed(
 		lastBeat = nowMs;
 		// Keep the active worker's registry row fresh so a long embed run isn't swept
 		// from the live set (best-effort — must not disturb embedding).
-		if (run.workerId) {
-			await db
-				.update(worker)
-				.set({ role: 'active', runId, phase: 'embedding', lastSeenAt: new Date() })
-				.where(eq(worker.id, run.workerId))
-				.catch(() => {});
-		}
+		await refreshActiveWorker(run.workerId, runId, 'embedding');
 		const [r] = await db
 			.update(syncRun)
 			.set({ heartbeatAt: new Date(), currentUrl })

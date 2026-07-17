@@ -164,7 +164,9 @@ export async function getWorkerHealth(): Promise<WorkerHealth> {
 	const flags: WorkerFlags = {
 		noActiveWorker: !!active && activeCount === 0,
 		staleHeartbeat: isRunning && (beatMs == null || now - beatMs > HEARTBEAT_STALE_MS),
-		// Warning only — never auto-fails the run.
+		// Warning only — never auto-fails the run. The `progressMs != null` guard also
+		// scopes this to crawl-family runs: only those write the progress marker, so
+		// extract/embed runs (progress_at stays null) are never flagged stalled.
 		stalled:
 			!!active &&
 			active.status === 'running' &&
