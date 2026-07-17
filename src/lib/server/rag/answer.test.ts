@@ -119,6 +119,41 @@ describe('answer', () => {
 		expect(result.citations).toEqual([]);
 	});
 
+	it("forces the 'not from the town's records' label onto an unlabeled fallback", async () => {
+		const { llm } = scriptedLlm(
+			JSON.stringify({
+				mode: 'fallback',
+				answer: 'A select board is the executive body of a New England town.', // no label
+				citations: []
+			})
+		);
+		const result = await answer('what is a select board?', {
+			llm,
+			retrieve: fakeRetrieval({ sources: [] })
+		});
+		expect(result.mode).toBe('fallback');
+		expect(result.answer).toMatch(/^This is not from the town's records:/);
+		expect(result.answer).toContain('executive body');
+	});
+
+	it('downgrades a grounded answer whose citations were all fabricated to abstained', async () => {
+		const { llm } = scriptedLlm(
+			JSON.stringify({
+				mode: 'grounded',
+				answer: 'The fee is $50.', // asserts a specific, but every citation is fake
+				citations: ['https://evil/made-up', 'https://also/fake']
+			})
+		);
+		const result = await answer('what is the fee?', {
+			llm,
+			retrieve: fakeRetrieval({ sources: [BUDGET] })
+		});
+		// No real source survived → cannot stand behind "grounded"; abstain instead.
+		expect(result.mode).toBe('abstained');
+		expect(result.citations).toEqual([]);
+		expect(result.answer).not.toContain('$50');
+	});
+
 	it('criterion 3: a hard specific not in the corpus abstains and points to where to look', async () => {
 		const { llm } = scriptedLlm(
 			JSON.stringify({

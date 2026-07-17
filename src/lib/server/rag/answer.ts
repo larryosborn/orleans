@@ -12,11 +12,17 @@
 //                 fee, legal rule, or who holds an office): do NOT guess — say it
 //                 isn't in the town's records and point to where to look.
 //
-// Two invariants the code enforces regardless of what the model returns, so a
-// hallucinating model can't break the contract:
+// Four invariants the code enforces regardless of what the model returns, so a
+// hallucinating model can't break the contract (the prompt asks for these; the
+// code guarantees them):
 //   • Citations are ALWAYS a subset of what was retrieved — we intersect the
 //     model's cited URLs with `sources`, dropping anything fabricated (criterion
 //     4). Only `grounded` answers carry citations; fallback/abstained carry none.
+//   • A `grounded` answer must keep at least one real (retrieved) citation — if
+//     every cited URL was fabricated and gets dropped, we can't stand behind the
+//     "grounded" claim, so it degrades to `abstained`.
+//   • A `fallback` answer is ALWAYS prefixed with the "not from the town's
+//     records" label, whether or not the model remembered to add it.
 //   • Mode is validated to the three-value enum; anything else degrades to
 //     `abstained` (the safe default — never assert an unsupported specific).
 import {
@@ -63,19 +69,16 @@ export interface AnswerOptions {
  * A blank question short-circuits to an abstention (nothing to ground on).
  */
 export async function answer(question: string, opts: AnswerOptions = {}): Promise<Answer> {
-	if (!question.trim()) {
-		return {
-			answer: "That question isn't answerable from the town's records.",
-			citations: [],
-			mode: 'abstained'
-		};
-	}
+	if (!question.trim()) return abstention();
+
+	// Select the LLM up front so a missing ANTHROPIC_API_KEY fails fast, before we
+	// spend an embed + vector query on retrieval we'd then throw away.
+	const llm = selectLlm(opts.llm);
 
 	const retrieveFn = opts.retrieve ?? defaultRetrieve;
 	const retrieval = await retrieveFn(question, opts.retrieveOptions);
 	const retrievedUrls = retrieval.sources.map((s) => s.url);
 
-	const llm = selectLlm(opts.llm);
 	const req: LlmCompletionRequest = {
 		system: SYSTEM_PROMPT,
 		messages: [{ role: 'user', content: buildUserMessage(question, retrieval) }],
@@ -121,39 +124,65 @@ Available source URLs (cite only these, verbatim):
 ${urls}`;
 }
 
+/** The label a fallback answer must carry — general knowledge, not town records. */
+const FALLBACK_LABEL = "This is not from the town's records:";
+
+/** The canned abstention: says it isn't in the records AND points onward — used
+ *  for blank/malformed/ungroundable cases so the "where to look" pointer (the
+ *  policy's requirement) holds even when we don't have the model's own wording. */
+function abstention(): Answer {
+	return {
+		answer:
+			"That isn't in the town's records. Try the relevant town department or board, or the town website / clerk.",
+		citations: [],
+		mode: 'abstained'
+	};
+}
+
 /**
  * Enforce the contract on the model's raw output: parse the JSON, validate the
- * mode, and intersect citations with what was actually retrieved. A malformed or
- * empty response degrades to a safe abstention rather than surfacing garbage.
+ * mode, intersect citations with what was actually retrieved, require a real
+ * citation to stay `grounded`, and force the fallback label. A malformed or empty
+ * response degrades to a safe abstention rather than surfacing garbage.
  */
 function normalize(raw: string, retrievedUrls: string[]): Answer {
 	const parsed = parseJsonObject(raw);
-	if (!parsed) {
-		return {
-			answer: "That question isn't answerable from the town's records.",
-			citations: [],
-			mode: 'abstained'
-		};
-	}
+	if (!parsed) return abstention();
 
 	const mode: AnswerMode =
 		parsed.mode === 'grounded' || parsed.mode === 'fallback' ? parsed.mode : 'abstained';
 
-	const answerText =
-		typeof parsed.answer === 'string' && parsed.answer.trim()
-			? parsed.answer.trim()
-			: "That question isn't answerable from the town's records.";
+	// Empty/malformed answer text → canned abstention (which points onward).
+	const answerText = typeof parsed.answer === 'string' ? parsed.answer.trim() : '';
+	if (!answerText) return abstention();
 
-	// Citations only for grounded answers, and only URLs that were truly
-	// retrieved — this is the hard guarantee against fabricated citations.
+	// Abstained: keep the model's own answer (it usually names where to look);
+	// never carries citations.
+	if (mode === 'abstained') return { answer: answerText, citations: [], mode: 'abstained' };
+
+	if (mode === 'fallback') {
+		// Guarantee the label regardless of whether the model added it.
+		const labeled = /not from the town's records/i.test(answerText)
+			? answerText
+			: `${FALLBACK_LABEL} ${answerText}`;
+		return { answer: labeled, citations: [], mode: 'fallback' };
+	}
+
+	// grounded: keep only URLs that were truly retrieved — the hard guarantee
+	// against fabricated citations.
 	const allowed = new Set(retrievedUrls);
-	const cited = Array.isArray(parsed.citations) ? parsed.citations : [];
-	const citations =
-		mode === 'grounded'
-			? [...new Set(cited.filter((u): u is string => typeof u === 'string' && allowed.has(u)))]
-			: [];
+	const citations = [
+		...new Set(
+			(Array.isArray(parsed.citations) ? parsed.citations : []).filter(
+				(u): u is string => typeof u === 'string' && allowed.has(u)
+			)
+		)
+	];
+	// A "grounded" claim with no surviving real citation is untrustworthy — every
+	// cited URL was fabricated — so we can't stand behind it. Abstain instead.
+	if (citations.length === 0) return abstention();
 
-	return { answer: answerText, citations, mode };
+	return { answer: answerText, citations, mode: 'grounded' };
 }
 
 interface RawAnswer {
