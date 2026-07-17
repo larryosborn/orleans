@@ -167,7 +167,9 @@ export async function getStorageHealth(): Promise<StorageHealth> {
 		})
 		.from(blob);
 
-	const [unpublished] = await db.select({ n: count() }).from(blob).where(isNull(blob.r2SyncedAt));
+	// Pending-publish backlog — reuse the dedicated read model added by #26 rather
+	// than re-inlining the `r2_synced_at IS NULL` count.
+	const unpublishedBlobs = await getUnpublishedBlobCount();
 
 	// Health signals over resources: refresh-due backlog + error/gone lifecycle.
 	const [h] = await db
@@ -181,7 +183,7 @@ export async function getStorageHealth(): Promise<StorageHealth> {
 	return {
 		storedBytes: Number(b?.storedBytes ?? 0),
 		blobObjects: b?.objects ?? 0,
-		unpublishedBlobs: unpublished?.n ?? 0,
+		unpublishedBlobs,
 		oldestBlobAt: b?.oldest != null ? Number(b.oldest) : null,
 		newestBlobAt: b?.newest != null ? Number(b.newest) : null,
 		ageBuckets: [

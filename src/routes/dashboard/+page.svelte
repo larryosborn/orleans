@@ -192,6 +192,14 @@
 	</div>
 {/snippet}
 
+<!-- Thin proportional bar (storage & cache-health panel). `pct` is pre-clamped by
+     the caller against a floored max, so it's always 0–100. -->
+{#snippet miniBar(pct: number)}
+	<div class="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+		<div class="h-full rounded-full bg-primary/70" style="width:{pct}%"></div>
+	</div>
+{/snippet}
+
 {#snippet statusDetail(label: string, value: string)}
 	<span class="flex justify-between gap-4">
 		<span class="text-background/60">{label}</span>
@@ -533,7 +541,7 @@
 					)}
 					{@render fig(
 						'Cache span',
-						sh.newestBlobAt != null ? formatRelative(sh.oldestBlobAt) : '—',
+						sh.oldestBlobAt != null ? formatRelative(sh.oldestBlobAt) : '—',
 						sh.newestBlobAt != null ? `newest ${formatRelative(sh.newestBlobAt)}` : 'no blobs yet'
 					)}
 				</div>
@@ -550,12 +558,7 @@
 										>{formatNumber(bucket.count)}</span
 									>
 								</div>
-								<div class="h-1.5 w-full overflow-hidden rounded-full bg-muted">
-									<div
-										class="h-full rounded-full bg-primary/70"
-										style="width:{Math.round((bucket.count / maxAgeBucket) * 100)}%"
-									></div>
-								</div>
+								{@render miniBar(Math.round((bucket.count / maxAgeBucket) * 100))}
 							</div>
 						{/each}
 					{:else}
@@ -599,12 +602,7 @@
 									{formatBytes(Number(row.bytes))} · {formatNumber(row.n)}
 								</span>
 							</div>
-							<div class="h-1.5 w-full overflow-hidden rounded-full bg-muted">
-								<div
-									class="h-full rounded-full bg-primary/70"
-									style="width:{Math.round((Number(row.bytes) / maxStorage) * 100)}%"
-								></div>
-							</div>
+							{@render miniBar(Math.round((Number(row.bytes) / maxStorage) * 100))}
 						</div>
 					{:else}
 						<p class="text-sm text-muted-foreground">No data yet.</p>

@@ -7,14 +7,14 @@ page when there's no session). See the
 
 ## Routes
 
-| Route                  | File(s)                            | Shows                                                                                                            |
-| ---------------------- | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `/dashboard`           | `+page.svelte` / `+page.server.ts` | Overview: **live** run status + progress, run controls, stat tiles, storage-by-type, errors, recent-changes feed |
-| `/dashboard/stream`    | `stream/+server.ts`                | SSE endpoint — streams the active run's progress (auth-gated)                                                    |
-| `/dashboard/runs`      | `runs/+page.*`                     | Run history table (click a row → detail)                                                                         |
-| `/dashboard/runs/[id]` | `runs/[id]/+page.*`                | Per-run stats, timing, worker id, and full event log                                                             |
-| `/dashboard/content`   | `content/+page.*`                  | Searchable/filterable resource explorer (by URL/title, kind, state) with pagination                              |
-| `/dashboard/blob/[id]` | `blob/[id]/+server.ts`             | View a resource's archived copy — presigned R2 redirect (prod) or local file (dev)                               |
+| Route                  | File(s)                            | Shows                                                                                                                   |
+| ---------------------- | ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `/dashboard`           | `+page.svelte` / `+page.server.ts` | Overview: **live** run status + progress, run controls, stat tiles, storage & cache health, errors, recent-changes feed |
+| `/dashboard/stream`    | `stream/+server.ts`                | SSE endpoint — streams the active run's progress (auth-gated)                                                           |
+| `/dashboard/runs`      | `runs/+page.*`                     | Run history table (click a row → detail)                                                                                |
+| `/dashboard/runs/[id]` | `runs/[id]/+page.*`                | Per-run stats, timing, worker id, and full event log                                                                    |
+| `/dashboard/content`   | `content/+page.*`                  | Searchable/filterable resource explorer (by URL/title, kind, state) with pagination                                     |
+| `/dashboard/blob/[id]` | `blob/[id]/+server.ts`             | View a resource's archived copy — presigned R2 redirect (prod) or local file (dev)                                      |
 
 ## Control plane
 
