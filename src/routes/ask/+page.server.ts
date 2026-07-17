@@ -2,6 +2,7 @@ import { fail, redirect } from '@sveltejs/kit';
 import type { Actions, PageServerLoad } from './$types';
 import { answer } from '$lib/server/rag/answer';
 import type { AskResult } from '$lib/chat';
+import { appLogger } from '$lib/server/app-log';
 
 // Gate /ask behind an authenticated session — same guard the dashboard uses
 // (src/routes/dashboard/+layout.server.ts). Unauthenticated visitors are bounced
@@ -19,6 +20,7 @@ export const actions: Actions = {
 	// a streaming variant (a +server.ts endpoint) can be added later without
 	// changing the UI's turn model.
 	ask: async ({ request, locals }) => {
+		const log = appLogger('ask', locals.requestId);
 		if (!locals.user) return fail(401, { error: 'Not authenticated' });
 
 		const data = await request.formData();
@@ -37,7 +39,7 @@ export const actions: Actions = {
 		} catch (err) {
 			// The most common failure is a missing ANTHROPIC_API_KEY (selectLlm throws).
 			// Surface a friendly message and echo the question back so the user can retry.
-			console.error('ask action failed:', err);
+			log.error({ err }, 'ask action failed');
 			return fail(503, {
 				error: 'The answering service is unavailable right now. Please try again in a moment.',
 				question
