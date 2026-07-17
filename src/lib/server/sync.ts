@@ -40,6 +40,14 @@ export async function setControl(runId: string, action: ControlAction): Promise<
 	await db.update(syncRun).set({ control }).where(eq(syncRun.id, runId));
 }
 
+/** Toggle frontier discovery for a run. Off = the worker keeps fetching/refreshing
+ *  known/queued resources but stops enqueuing newly-discovered URLs; on = resume
+ *  discovery. Independent of pause/cancel; the worker re-reads it live on its
+ *  heartbeat cadence, so no restart is needed. */
+export async function setDiscovery(runId: string, enabled: boolean): Promise<void> {
+	await db.update(syncRun).set({ discoveryEnabled: enabled }).where(eq(syncRun.id, runId));
+}
+
 /** The run currently occupying the worker (or most-recently queued), if any. */
 export async function getActiveRun() {
 	const [row] = await db

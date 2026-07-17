@@ -229,6 +229,33 @@
 					</Tooltip.Provider>
 
 					{#if active}
+						<!-- Frontier-discovery switch. On (default) enqueues newly-found URLs; off
+						     drains the known backlog without growing the frontier. Posts the target
+						     state (not a blind toggle) so a double-submit is idempotent. -->
+						<form method="POST" action="?/discovery" use:enhance>
+							<input type="hidden" name="runId" value={active.id} />
+							<input type="hidden" name="enabled" value={active.discoveryEnabled ? 'off' : 'on'} />
+							{#if active.discoveryEnabled}
+								<Button
+									type="submit"
+									variant="outline"
+									size="sm"
+									title="Stop enqueuing newly-discovered URLs; keep refreshing known ones"
+								>
+									Discovery: on
+								</Button>
+							{:else}
+								<Button
+									type="submit"
+									variant="outline"
+									size="sm"
+									class="border-amber-500 text-amber-600 dark:text-amber-500"
+									title="Resume enqueuing newly-discovered URLs"
+								>
+									Discovery: off
+								</Button>
+							{/if}
+						</form>
 						<form method="POST" action="?/control" use:enhance>
 							<input type="hidden" name="runId" value={active.id} />
 							{#if active.status === 'paused'}

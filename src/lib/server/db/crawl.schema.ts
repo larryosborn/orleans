@@ -277,6 +277,12 @@ export const syncRun = sqliteTable(
 		mode: text('mode').notNull(), // estimate | crawl | recrawl
 		status: text('status').notNull().default('queued'), // queued|running|paused|completed|failed|canceled
 		control: text('control').notNull().default('none'), // none | pause | resume | cancel
+		// Frontier discovery switch. When true (default = today's behavior) the crawl
+		// enqueues newly-discovered in-scope URLs; when false the worker keeps
+		// fetching/refreshing already-known/queued resources but ingests no new links,
+		// so it drains the known backlog. Steerable live from the dashboard; the worker
+		// re-reads it on the heartbeat cadence (no restart needed).
+		discoveryEnabled: integer('discovery_enabled', { mode: 'boolean' }).notNull().default(true),
 		maxPages: integer('max_pages'),
 		params: text('params'), // JSON blob for future knobs
 		requestedBy: text('requested_by'), // user id
