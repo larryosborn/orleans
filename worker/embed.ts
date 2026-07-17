@@ -12,7 +12,7 @@
 // its chunks removed too. So a re-run over unchanged content does no work.
 import { and, asc, eq, gt, or, sql } from 'drizzle-orm';
 import { db } from './db';
-import { chunk, resource, resourceText, syncRun } from '../src/lib/server/db/schema';
+import { chunk, crawlEvent, resource, resourceText, syncRun } from '../src/lib/server/db/schema';
 import type { SyncRun } from '../src/lib/server/db/crawl.schema';
 import { EMBED_BATCH } from './config';
 import { chunkText } from './chunk';
@@ -47,14 +47,11 @@ async function rebuildResource(
 	},
 	embedder: Embedder
 ): Promise<number> {
-	// Delete first so a change re-embeds cleanly and leaves no stale/orphan chunks.
-	await db.delete(chunk).where(eq(chunk.resourceId, row.resourceId));
-
 	const pieces = chunkText(row.text);
-	if (pieces.length === 0) return 0;
 
 	const now = new Date();
-	// Embed in batches, then insert the resulting rows in bounded statements.
+	// Embed OUTSIDE the transaction — it's the slow, network-bound part, and we
+	// don't want a hosted-model round-trip holding a write transaction open.
 	const pending: (typeof chunk.$inferInsert)[] = [];
 	for (let i = 0; i < pieces.length; i += EMBED_BATCH) {
 		const batch = pieces.slice(i, i + EMBED_BATCH);
@@ -77,9 +74,16 @@ async function rebuildResource(
 			});
 		}
 	}
-	for (let i = 0; i < pending.length; i += INSERT_CHUNK_ROWS) {
-		await db.insert(chunk).values(pending.slice(i, i + INSERT_CHUNK_ROWS));
-	}
+
+	// Swap old chunks for new atomically: delete-then-insert in one transaction so
+	// a mid-insert failure can't leave a resource half-chunked but carrying the new
+	// source_sha (which would make the freshness predicate skip it forever).
+	await db.transaction(async (tx) => {
+		await tx.delete(chunk).where(eq(chunk.resourceId, row.resourceId));
+		for (let i = 0; i < pending.length; i += INSERT_CHUNK_ROWS) {
+			await tx.insert(chunk).values(pending.slice(i, i + INSERT_CHUNK_ROWS));
+		}
+	});
 	return pending.length;
 }
 
@@ -195,6 +199,15 @@ export async function executeEmbed(
 			} catch (e) {
 				stats.errors++;
 				const msg = e instanceof Error ? e.message : String(e);
+				// Surface per-resource failures on the dashboard's error channel, the
+				// same way extract records `extract_error` events.
+				await db.insert(crawlEvent).values({
+					runId,
+					resourceId: r.resourceId,
+					url: r.url,
+					kind: 'embed_error',
+					message: `embed failed: ${msg}`.slice(0, 500)
+				});
 				console.error(`✗ embed ${r.url}: ${msg}`);
 			}
 		}
