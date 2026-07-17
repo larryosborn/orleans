@@ -86,5 +86,18 @@ export const actions: Actions = {
 		}
 		await sync.setControl(runId, action as sync.ControlAction);
 		return { controlled: action };
+	},
+
+	discovery: async ({ request }) => {
+		const data = await request.formData();
+		const runId = String(data.get('runId') ?? '');
+		// Explicit target state so a rapid double-submit is idempotent (never a toggle
+		// race). 'on' | 'off'; anything else is rejected.
+		const enabled = String(data.get('enabled') ?? '');
+		if (!runId || (enabled !== 'on' && enabled !== 'off')) {
+			return fail(400, { error: 'invalid discovery toggle' });
+		}
+		await sync.setDiscovery(runId, enabled === 'on');
+		return { discovery: enabled };
 	}
 };
