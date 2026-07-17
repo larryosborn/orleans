@@ -43,7 +43,7 @@ import {
 	sha256Hex
 } from './http';
 import { refreshActiveWorker } from './registry';
-import { logger } from '../src/lib/server/log';
+import { runLogger } from './log';
 
 const HEARTBEAT_MS = 2000;
 
@@ -238,13 +238,8 @@ export async function executeRun(run: SyncRun, opts: { publish?: boolean } = {})
 	const mode = run.mode as Mode;
 	const runId = run.id;
 	const maxPages = run.maxPages ?? MAX_PAGES;
-	// Correlation for the whole crawl — workerId/runId/mode/phase on every line.
-	const log = logger('crawl').child({
-		workerId: run.workerId ?? undefined,
-		runId,
-		mode,
-		phase: 'crawling'
-	});
+	// workerId/runId/mode/phase ride on every line (see worker/log.ts).
+	const log = runLogger('crawl', run, 'crawling');
 
 	// Optional document size limit: docs bigger than this are recorded but not
 	// downloaded (HTML is always fetched). Per-run params override the env default.
@@ -433,13 +428,8 @@ export async function executeSync(run: SyncRun, opts: { publish?: boolean } = {}
 	const maxPages = run.maxPages ?? MAX_PAGES;
 	const params = run.params ? (JSON.parse(run.params) as { maxDocBytes?: number }) : {};
 	const maxDocBytes = typeof params.maxDocBytes === 'number' ? params.maxDocBytes : MAX_DOC_BYTES;
-	// Correlation for the whole sync run — workerId/runId/mode/phase on every line.
-	const log = logger('crawl').child({
-		workerId: run.workerId ?? undefined,
-		runId,
-		mode: run.mode,
-		phase: 'crawling'
-	});
+	// workerId/runId/mode/phase ride on every line (see worker/log.ts).
+	const log = runLogger('crawl', run, 'crawling');
 	// Blobs always land in the local backend; R2 write-through is opt-in (--publish).
 	const writer = makeBlobWriter({ publish: opts.publish ?? false });
 	log.info({ blobStore: writer.label }, 'blob store');

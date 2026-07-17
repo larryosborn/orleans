@@ -17,9 +17,9 @@ import { eq, isNull } from 'drizzle-orm';
 import { db } from './db';
 import { blob } from '../src/lib/server/db/schema';
 import { makeLocalStorage, makeR2Storage, localDir, type Storage } from './storage';
-import { logger } from '../src/lib/server/log';
+import { workerLogger } from './log';
 
-const log = logger('sync-blobs');
+const log = workerLogger('sync-blobs');
 
 function human(n: number): string {
 	const u = ['B', 'KB', 'MB', 'GB', 'TB'];

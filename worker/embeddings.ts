@@ -13,9 +13,9 @@
 // column width, so the store never has to care which produced a given vector.
 import { CLOUDFLARE_EMBED_MODEL, EMBEDDING_PROVIDER, OPENAI_EMBED_MODEL } from './config';
 import { EMBED_DIM } from '../src/lib/server/db/crawl.schema';
-import { logger } from '../src/lib/server/log';
+import { workerLogger } from './log';
 
-const log = logger('embed');
+const log = workerLogger('embed');
 
 export interface Embedder {
 	/** Provenance id stored on each chunk (e.g. `cloudflare:@cf/baai/bge-base-en-v1.5`). */

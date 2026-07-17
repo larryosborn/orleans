@@ -6,9 +6,9 @@
 import { eq, lt } from 'drizzle-orm';
 import { db } from './db';
 import { worker } from '../src/lib/server/db/schema';
-import { logger } from '../src/lib/server/log';
+import { workerLogger } from './log';
 
-const log = logger('registry');
+const log = workerLogger('registry');
 
 export type WorkerRole = 'active' | 'standby';
 

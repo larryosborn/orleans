@@ -18,7 +18,7 @@ import { EMBED_BATCH } from './config';
 import { chunkText } from './chunk';
 import { selectEmbedder, type Embedder } from './embeddings';
 import { refreshActiveWorker } from './registry';
-import { logger } from '../src/lib/server/log';
+import { runLogger } from './log';
 
 const HEARTBEAT_MS = 2000;
 const BATCH = 200; // resources per DB round-trip
@@ -95,13 +95,8 @@ export async function executeEmbed(
 ): Promise<void> {
 	const runId = run.id;
 	const maxPages = run.maxPages ?? Infinity; // --max caps processed resources (testing)
-	// Correlation for the whole embed run — workerId/runId/mode/phase on every line.
-	const log = logger('embed').child({
-		workerId: run.workerId ?? undefined,
-		runId,
-		mode: run.mode,
-		phase: 'embedding'
-	});
+	// workerId/runId/mode/phase ride on every line (see worker/log.ts).
+	const log = runLogger('embed', run, 'embedding');
 	const embedder = selectEmbedder(opts.embedder);
 	const stats = zero();
 	let control: string = run.control;

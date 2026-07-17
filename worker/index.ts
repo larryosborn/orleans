@@ -23,7 +23,7 @@ import { executeRun, executeSync } from './crawl';
 import { executeExtract } from './extract';
 import { executeEmbed } from './embed';
 import { deregisterWorker, sweepStaleWorkers, upsertWorker, type WorkerIdentity } from './registry';
-import { logger } from '../src/lib/server/log';
+import { workerLogger } from './log';
 
 const WORKER_HOST = process.env.HOSTNAME ?? hostname();
 const WORKER_ID = `${WORKER_HOST}-${process.pid}-${crypto.randomUUID().slice(0, 8)}`;
@@ -32,9 +32,9 @@ const POLL_INTERVAL_MS = 3000;
 const MAINTENANCE_INTERVAL_MS = 30_000;
 const ACTIVE = ['queued', 'running', 'paused'] as const;
 
-// Base logger for the poll loop, bound with this process's identity — every line
-// below (and every per-run child) self-locates by workerId/host/pid.
-const log = logger('index').child({ workerId: WORKER_ID, host: WORKER_HOST, pid: process.pid });
+// Base logger for the poll loop, bound with this process's worker id (host/pid come
+// from workerLogger) — every line below, and every per-run child, self-locates.
+const log = workerLogger('index').child({ workerId: WORKER_ID });
 
 let stopping = false;
 let standby = false;

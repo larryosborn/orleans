@@ -22,7 +22,7 @@ import { blob, crawlEvent, resource, resourceText, syncRun } from '../src/lib/se
 import type { ExtractionStatus, SyncRun } from '../src/lib/server/db/crawl.schema';
 import { localDir, makeLocalStorage, makeR2Storage } from './storage';
 import { refreshActiveWorker } from './registry';
-import { logger } from '../src/lib/server/log';
+import { runLogger } from './log';
 
 const HEARTBEAT_MS = 2000;
 const BATCH = 200; // resources per DB round-trip
@@ -180,13 +180,8 @@ async function writeResult(
 export async function executeExtract(run: SyncRun): Promise<void> {
 	const runId = run.id;
 	const maxPages = run.maxPages ?? Infinity; // --max caps processed count (testing)
-	// Correlation for the whole extract run — workerId/runId/mode/phase on every line.
-	const log = logger('extract').child({
-		workerId: run.workerId ?? undefined,
-		runId,
-		mode: run.mode,
-		phase: 'extracting'
-	});
+	// workerId/runId/mode/phase ride on every line (see worker/log.ts).
+	const log = runLogger('extract', run, 'extracting');
 	const readBlob = makeBlobReader();
 	const stats = zero();
 	let control: string = run.control;
