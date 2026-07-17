@@ -246,7 +246,7 @@ export async function executeRun(run: SyncRun, opts: { publish?: boolean } = {})
 	// undefined = download all documents; 0 = skip all (pages-only).
 	const params = run.params ? (JSON.parse(run.params) as { maxDocBytes?: number }) : {};
 	const maxDocBytes = typeof params.maxDocBytes === 'number' ? params.maxDocBytes : MAX_DOC_BYTES;
-	// Blobs always land in the local backend; R2 write-through is opt-in (--publish).
+	// Publishing (--publish) writes blobs to R2 only; otherwise local-only.
 	// Only crawl/recrawl write bodies; estimate never touches storage.
 	const writer = makeBlobWriter({ publish: opts.publish ?? false });
 	if (mode !== 'estimate') log.info({ blobStore: writer.label }, 'blob store');
@@ -430,7 +430,7 @@ export async function executeSync(run: SyncRun, opts: { publish?: boolean } = {}
 	const maxDocBytes = typeof params.maxDocBytes === 'number' ? params.maxDocBytes : MAX_DOC_BYTES;
 	// workerId/runId/mode/phase ride on every line (see worker/log.ts).
 	const log = runLogger('crawl', run, 'crawling');
-	// Blobs always land in the local backend; R2 write-through is opt-in (--publish).
+	// Publishing (--publish) writes blobs to R2 only; otherwise local-only.
 	const writer = makeBlobWriter({ publish: opts.publish ?? false });
 	log.info({ blobStore: writer.label }, 'blob store');
 
