@@ -99,6 +99,7 @@
 		"*.{js,ts,svelte}": "eslint --fix"
 	},
 	"dependencies": {
+		"@anthropic-ai/sdk": "^0.112.1",
 		"@mozilla/readability": "^0.6.0",
 		"aws4fetch": "^1.0.20",
 		"linkedom": "^0.18.13",
