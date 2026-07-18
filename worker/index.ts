@@ -1,8 +1,13 @@
-// Sync worker entrypoint. Polls sync_run for queued jobs, claims one at a time
-// (atomic guard against double-claim), and runs it to completion. Also supports
-// a one-shot CLI mode for ops/testing:
+// Sync worker entrypoint — now a THIN shell over the runtime seam. It builds this
+// process's identity + tick budget, applies pending migrations, then either:
+//   • pumps the CORE (worker/core.ts) to completion for a one-shot CLI job, or
+//   • hands off to the LOCAL DRIVER (worker/driver.ts) for the long-running loop.
 //
-//   bun run worker/index.ts                       # long-running poll loop
+// The execution model (the loop, sleeps, signals, maintenance) lives in the
+// driver; the bounded batch of crawl work lives in the core. This file only wires
+// them together and parses flags. See worker/README.md § Runtime seam.
+//
+//   bun run worker/index.ts                       # long-running local driver
 //   bun run worker/index.ts --publish             # ...writing blobs through to R2
 //   bun run worker/index.ts --mode estimate --max 80 --once
 //   bun run worker/index.ts --mode crawl          # enqueue + run once, then exit
@@ -13,36 +18,19 @@
 import { hostname } from 'node:os';
 import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { and, asc, desc, eq, gt, inArray, lt } from 'drizzle-orm';
 import { client, db } from './db';
 import { syncRun } from '../src/lib/server/db/schema';
-import type { SyncRun } from '../src/lib/server/db/crawl.schema';
 import { applyMigrations } from '../src/lib/server/db/migrator';
-import { SYNC_SCHEDULE_MS, STALE_RUN_MS } from './config';
-import { executeRun, executeSync } from './crawl';
-import { executeExtract } from './extract';
-import { executeEmbed } from './embed';
-import { deregisterWorker, sweepStaleWorkers, upsertWorker, type WorkerIdentity } from './registry';
+import { DEFAULT_BUDGET } from './core';
+import { makeLocalDriver, runSingleJob, type DriverContext } from './driver';
+import type { WorkerIdentity } from './registry';
 import { workerLogger } from './log';
 
 const WORKER_HOST = process.env.HOSTNAME ?? hostname();
 const WORKER_ID = `${WORKER_HOST}-${process.pid}-${crypto.randomUUID().slice(0, 8)}`;
 const IDENTITY: WorkerIdentity = { id: WORKER_ID, host: WORKER_HOST, pid: process.pid };
-const POLL_INTERVAL_MS = 3000;
-const MAINTENANCE_INTERVAL_MS = 30_000;
-const ACTIVE = ['queued', 'running', 'paused'] as const;
 
-// Base logger for the poll loop, bound with this process's worker id (host/pid come
-// from workerLogger) — every line below, and every per-run child, self-locates.
 const log = workerLogger('index').child({ workerId: WORKER_ID });
-
-let stopping = false;
-let standby = false;
-process.on('SIGINT', () => {
-	stopping = true;
-	log.info('SIGINT received — shutting down after current job');
-});
-process.on('SIGTERM', () => (stopping = true));
 
 /** Apply pending drizzle migrations (same runner the web app uses). */
 async function ensureSchema(): Promise<void> {
@@ -54,166 +42,16 @@ async function ensureSchema(): Promise<void> {
 	if (ran.length) log.info({ migrations: ran }, `applied ${ran.length} migration(s)`);
 }
 
-/** Atomically claim the oldest queued run; returns it or null. */
-async function claimNext(): Promise<SyncRun | null> {
-	// Single-writer guard. Two workers iterating the same frontier double-process
-	// every resource — duplicate version rows, double blob writes, and 2× request
-	// load on the (politely rate-limited) target site. If another worker already
-	// owns a live run (fresh heartbeat), stand down. This process becomes a warm
-	// standby: it only starts claiming once that worker dies and its run goes
-	// stale (reaped by reapStaleRuns).
-	const [live] = await db
-		.select({ id: syncRun.id, workerId: syncRun.workerId })
-		.from(syncRun)
-		.where(
-			and(
-				inArray(syncRun.status, ['running', 'paused']),
-				gt(syncRun.heartbeatAt, new Date(Date.now() - STALE_RUN_MS))
-			)
-		)
-		.limit(1);
-	if (live) {
-		if (!standby) {
-			log.info(
-				{ activeWorkerId: live.workerId },
-				'another worker owns an active run — standing by'
-			);
-			standby = true;
-		}
-		return null;
-	}
-	standby = false;
-
-	const [queued] = await db
-		.select()
-		.from(syncRun)
-		.where(eq(syncRun.status, 'queued'))
-		.orderBy(asc(syncRun.requestedAt))
-		.limit(1);
-	if (!queued) return null;
-
-	const claimed = await db
-		.update(syncRun)
-		.set({ status: 'running', workerId: WORKER_ID, startedAt: new Date(), heartbeatAt: new Date() })
-		.where(and(eq(syncRun.id, queued.id), eq(syncRun.status, 'queued')))
-		.returning();
-	return claimed[0] ?? null; // null => another worker grabbed it first
-}
-
-async function runOne(run: SyncRun, publish: boolean): Promise<void> {
-	// Per-run child: runId + mode ride on every line the run's own modules emit too
-	// (they bind the same fields off run.*), so the whole run correlates.
-	const runLog = log.child({ runId: run.id, mode: run.mode });
-	runLog.info({ maxPages: run.maxPages ?? 'default', publish }, 'run started');
-	try {
-		if (run.mode === 'sync') await executeSync(run, { publish });
-		else if (run.mode === 'extract') await executeExtract(run);
-		else if (run.mode === 'embed') await executeEmbed(run);
-		else await executeRun(run, { publish });
-		const [done] = await db.select().from(syncRun).where(eq(syncRun.id, run.id));
-		// extract/embed log their own summary (counts are stage-specific, not crawl rollups).
-		if (run.mode !== 'extract' && run.mode !== 'embed') {
-			runLog.info(
-				{
-					status: done?.status,
-					pages: done?.pages,
-					documents: done?.documents,
-					new: done?.newCount,
-					changed: done?.changedCount,
-					errors: done?.errorCount
-				},
-				'run finished'
-			);
-		}
-	} catch (e) {
-		const msg = e instanceof Error ? (e.stack ?? e.message) : String(e);
-		runLog.error({ err: e }, 'run failed');
-		await db
-			.update(syncRun)
-			.set({ status: 'failed', finishedAt: new Date(), error: msg.slice(0, 2000) })
-			.where(eq(syncRun.id, run.id));
-	}
-}
-
-/** Mark crashed runs (running/paused, heartbeat gone stale) as failed, so a dead
- *  worker doesn't leave an active row blocking claims + the schedule. */
-async function reapStaleRuns(): Promise<void> {
-	const reaped = await db
-		.update(syncRun)
-		.set({ status: 'failed', finishedAt: new Date(), error: 'worker heartbeat timed out (reaped)' })
-		.where(
-			and(
-				inArray(syncRun.status, ['running', 'paused']),
-				lt(syncRun.heartbeatAt, new Date(Date.now() - STALE_RUN_MS))
-			)
-		)
-		.returning({ id: syncRun.id });
-	if (reaped.length)
-		log.warn({ reaped: reaped.map((r) => r.id) }, `reaped ${reaped.length} stale run(s)`);
-}
-
-/** Auto-schedule: enqueue a `sync` run when enabled, idle, and one is due. */
-async function maybeScheduleSync(): Promise<void> {
-	if (SYNC_SCHEDULE_MS <= 0) return;
-	const [active] = await db
-		.select({ id: syncRun.id })
-		.from(syncRun)
-		.where(inArray(syncRun.status, [...ACTIVE]))
-		.limit(1);
-	if (active) return; // don't stack runs
-	const [last] = await db
-		.select({ at: syncRun.requestedAt })
-		.from(syncRun)
-		.where(eq(syncRun.mode, 'sync'))
-		.orderBy(desc(syncRun.requestedAt))
-		.limit(1);
-	const dueAt = last ? last.at.getTime() + SYNC_SCHEDULE_MS : 0;
-	if (Date.now() < dueAt) return;
-	await db.insert(syncRun).values({ mode: 'sync', status: 'queued', requestedBy: 'scheduler' });
-	log.info('scheduled sync enqueued');
-}
-
-async function pollLoop(publish: boolean): Promise<void> {
-	log.info(
-		{
-			pollIntervalMs: POLL_INTERVAL_MS,
-			autoSyncMinutes: SYNC_SCHEDULE_MS > 0 ? SYNC_SCHEDULE_MS / 60_000 : null,
-			publish
-		},
-		'sync worker polling'
-	);
-	let lastMaintenance = 0;
-	while (!stopping) {
-		if (Date.now() - lastMaintenance > MAINTENANCE_INTERVAL_MS) {
-			lastMaintenance = Date.now();
-			await reapStaleRuns();
-			await sweepStaleWorkers(STALE_RUN_MS);
-			// Refresh this process's registry row. Between jobs a worker is a standby
-			// (idle or standing down behind the single-writer guard); the active role is
-			// stamped on claim + each heartbeat, so this refresh is always standby.
-			await upsertWorker(IDENTITY, 'standby', null, null);
-			await maybeScheduleSync();
-		}
-		const run = await claimNext();
-		if (run) {
-			// Flip to active immediately (the heartbeat keeps it fresh mid-run),
-			// then back to standby when the run returns.
-			await upsertWorker(IDENTITY, 'active', run.id, run.currentPhase ?? null);
-			await runOne(run, publish);
-			await upsertWorker(IDENTITY, 'standby', null, null);
-		} else await Bun.sleep(POLL_INTERVAL_MS);
-	}
-	await deregisterWorker(WORKER_ID);
-	log.info('stopped');
-}
-
-async function enqueueAndRunOnce(mode: string, publish: boolean, maxPages?: number): Promise<void> {
-	const [run] = await db
+/** Enqueue a single run and pump the core to completion (one-shot CLI). */
+async function enqueueAndRunOnce(
+	ctx: DriverContext,
+	mode: string,
+	maxPages?: number
+): Promise<void> {
+	await db
 		.insert(syncRun)
-		.values({ mode, maxPages: maxPages ?? null, status: 'queued', requestedBy: 'cli' })
-		.returning();
-	const claimed = await claimNext(); // claims the row we just made
-	await runOne(claimed ?? run, publish);
+		.values({ mode, maxPages: maxPages ?? null, status: 'queued', requestedBy: 'cli' });
+	await runSingleJob(ctx);
 }
 
 function parseArgs(argv: string[]): {
@@ -236,11 +74,13 @@ function parseArgs(argv: string[]): {
 }
 
 const args = parseArgs(process.argv.slice(2));
+const ctx: DriverContext = { identity: IDENTITY, publish: args.publish, budget: DEFAULT_BUDGET };
+
 await ensureSchema();
 if (args.mode || args.once) {
-	await enqueueAndRunOnce(args.mode ?? 'estimate', args.publish, args.max);
+	await enqueueAndRunOnce(ctx, args.mode ?? 'estimate', args.max);
 	process.exit(0);
 } else {
-	await pollLoop(args.publish);
+	await makeLocalDriver(ctx).run();
 	process.exit(0);
 }

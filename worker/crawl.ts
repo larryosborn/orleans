@@ -2,6 +2,15 @@
 // sitemap + module seeds, conditional GETs for change detection, content-
 // addressed blob storage, and full manifest/version/link bookkeeping in Turso.
 // Honors run.control (pause/cancel) and writes heartbeats for the dashboard.
+//
+// The engine is exposed as resumable *sessions* (createCrawlSession /
+// createSyncSession), NOT as a single run-to-completion loop. Each session's
+// `step(budget)` processes ONE bounded batch of frontier work and returns —
+// bounded by a max item count AND a soft wall-time budget. The env-agnostic core
+// (worker/core.ts) pumps these steps; the driver (worker/driver.ts) owns the loop.
+// Splitting the frontier walk into bounded steps is what lets the same engine run
+// under a long-lived local driver OR a future serverless one-tick-per-invocation
+// driver, without the engine knowing which. See worker/README.md § Runtime seam.
 import { and, asc, eq, isNull, lte, ne, or, sql } from 'drizzle-orm';
 import { db } from './db';
 import {
@@ -44,6 +53,7 @@ import {
 } from './http';
 import { refreshActiveWorker } from './registry';
 import { runLogger } from './log';
+import type { RunSession, StepBudget, StepResult } from './core';
 
 const HEARTBEAT_MS = 2000;
 
@@ -234,7 +244,51 @@ async function ingestResponse(resp: Response, ctx: IngestCtx): Promise<string[]>
 	return [];
 }
 
-export async function executeRun(run: SyncRun, opts: { publish?: boolean } = {}): Promise<void> {
+// A run finished its crawl: log the same rollup summary the old poll loop printed
+// from index.ts, but from the stats we already hold (no re-select). Skipped for
+// `canceled` — a canceled run's partial counts aren't a completion summary.
+function logRunSummary(log: ReturnType<typeof runLogger>, status: string, stats: Stats): void {
+	log.info(
+		{
+			status,
+			pages: stats.pages,
+			documents: stats.documents,
+			new: stats.newCount,
+			changed: stats.changedCount,
+			errors: stats.errorCount
+		},
+		'run finished'
+	);
+}
+
+// Terminal step for both crawl-family and sync sessions: resolve link targets to
+// resource ids in one pass, finalize the run row, and log the rollup (except when
+// canceled). Shared so the two sessions can't drift on how a run ends.
+async function finishRun(
+	runId: string,
+	status: string,
+	log: ReturnType<typeof runLogger>,
+	stats: Stats
+): Promise<void> {
+	await backfillLinkTargets();
+	await finalizeRun(runId, status, stats);
+	if (status !== 'canceled') logRunSummary(log, status, stats);
+}
+
+// ---------------------------------------------------------------------------
+// crawl / estimate / recrawl — in-memory BFS frontier, as a resumable session.
+//
+// The BFS `queue`/`seen` live in the session closure, so successive `step()`
+// calls continue the SAME frontier (the local driver keeps the session warm
+// across ticks). Unlike `sync`, this frontier is NOT persisted, so it resumes
+// only in-process — a fresh process re-seeds from SEED_PATHS (exactly today's
+// behavior: killing a crawl restarts it; `crawl` mode then skips already-captured
+// URLs). `sync` is the DB-resumable mode a serverless driver would pump.
+// ---------------------------------------------------------------------------
+export async function createCrawlSession(
+	run: SyncRun,
+	opts: { publish?: boolean } = {}
+): Promise<RunSession> {
 	const mode = run.mode as Mode;
 	const runId = run.id;
 	const maxPages = run.maxPages ?? MAX_PAGES;
@@ -264,12 +318,15 @@ export async function executeRun(run: SyncRun, opts: { publish?: boolean } = {})
 	}
 
 	let control: string = run.control;
-	// Live frontier-discovery switch, refreshed each heartbeat (see executeSync).
+	// Live frontier-discovery switch, refreshed each heartbeat (see createSyncSession).
 	let discoveryEnabled = run.discoveryEnabled;
 	let lastBeat = 0;
 	// Forward-progress watermark for the stall marker: the last requestsMade value
 	// we recorded a progress bump for. -1 so the first beat always initializes it.
 	let lastProgress = -1;
+	// Whether we've flipped the run row to `paused` — so we flip it back to `running`
+	// exactly once on resume (see gateControl). Persists across steps.
+	let paused = false;
 	const workerId = run.workerId;
 
 	async function beat(currentUrl: string | null): Promise<void> {
@@ -285,6 +342,19 @@ export async function executeRun(run: SyncRun, opts: { publish?: boolean } = {})
 		}));
 	}
 
+	// Control gate: heartbeat, then classify. On pause it flips the run row to
+	// `paused` (once) and yields `paused` — the core never blocks, it returns and
+	// the driver re-ticks (this replaces the old in-loop `Bun.sleep` pause wait).
+	// On resume it flips back to `running`.
+	const gateControl = (url: string | null) =>
+		gate(
+			runId,
+			() => beat(url),
+			() => control,
+			() => paused,
+			(p) => (paused = p)
+		);
+
 	// Mark running. Seed progress_at so a run is never "stalled" before its first beat.
 	await db
 		.update(syncRun)
@@ -296,121 +366,132 @@ export async function executeRun(run: SyncRun, opts: { publish?: boolean } = {})
 		})
 		.where(eq(syncRun.id, runId));
 
-	while (queue.length > 0 && stats.requestsMade < maxPages) {
-		const url = queue.shift()!;
-		if (seen.has(url) || !inScope(url)) continue;
-		seen.add(url);
+	const finish = (status: string) => finishRun(runId, status, log, stats);
 
-		// Control: react to pause/cancel between requests.
-		await beat(url);
-		if (control === 'cancel') break;
-		while (control === 'pause') {
-			await db.update(syncRun).set({ status: 'paused' }).where(eq(syncRun.id, runId));
-			await Bun.sleep(1500);
-			lastBeat = 0;
-			await beat(url);
-			if (control === 'cancel') break;
-			if (control !== 'pause') {
-				await db.update(syncRun).set({ status: 'running' }).where(eq(syncRun.id, runId));
-			}
-		}
-		if (control === 'cancel') break;
+	return {
+		run,
+		phase: 'crawling',
+		async step(budget: StepBudget): Promise<StepResult> {
+			const deadline = Date.now() + budget.timeBudgetMs;
+			let items = 0;
+			while (queue.length > 0 && stats.requestsMade < maxPages) {
+				// Bounded batch: yield `more` once the item cap or wall-time budget trips.
+				if (items >= budget.maxItems || Date.now() >= deadline) return 'more';
 
-		if (!robots.canFetch(url)) {
-			await logEvent(runId, url, 'robots_blocked', null, null);
-			log.debug({ url }, 'robots blocked');
-			continue;
-		}
+				const url = queue.shift()!;
+				if (seen.has(url) || !inScope(url)) continue;
+				seen.add(url);
 
-		// Existing manifest row drives conditional GET + change detection.
-		const existing = await db
-			.select({
-				id: resource.id,
-				sha256: resource.sha256,
-				etag: resource.etag,
-				lastModified: resource.lastModified,
-				sizeBytes: resource.sizeBytes,
-				lastFetchedAt: resource.lastFetchedAt
-			})
-			.from(resource)
-			.where(eq(resource.url, url))
-			.limit(1);
-		const prev = existing[0];
-
-		// Plain crawl skips URLs already captured; recrawl/estimate re-check.
-		if (prev && prev.lastFetchedAt && mode === 'crawl') continue;
-
-		const headers: Record<string, string> = {};
-		if (prev && mode === 'recrawl') {
-			if (prev.etag) headers['If-None-Match'] = prev.etag;
-			if (prev.lastModified) headers['If-Modified-Since'] = prev.lastModified;
-		}
-
-		const { resp, throttled, error } = await politeFetch(url, headers);
-		stats.requestsMade++;
-		if (throttled) {
-			await logEvent(runId, url, 'throttled', null, null);
-			log.debug({ url }, 'throttled');
-		}
-
-		if (!resp) {
-			stats.errorCount++;
-			await logEvent(runId, url, 'fetch_error', null, error ?? 'no response');
-			log.warn({ url, error: error ?? 'no response' }, 'fetch error');
-			await recordFailure(runId, url, prev?.id, 0, 'error');
-			await politeDelay();
-			continue;
-		}
-		if (resp.status === 304) {
-			stats.unchangedCount++;
-			if (prev) await touchFetched(prev.id, runId);
-			resp.body?.cancel();
-			await politeDelay();
-			continue;
-		}
-		if (resp.status !== 200) {
-			resp.body?.cancel();
-			stats.errorCount++;
-			await logEvent(runId, url, 'http_error', resp.status, null);
-			log.warn({ url, status: resp.status }, 'http error');
-			if (resp.status === 404 || resp.status === 410) {
-				stats.goneCount++;
-				await recordGone(runId, url, prev?.id, resp.status);
-			} else {
-				await recordFailure(runId, url, prev?.id, resp.status, 'error');
-			}
-			await politeDelay();
-			continue;
-		}
-		stats.fetched++;
-		const targets = await ingestResponse(resp, {
-			url,
-			prevId: prev?.id,
-			prevSha: prev?.sha256 ?? null,
-			prevSize: prev?.sizeBytes ?? null,
-			mode,
-			maxDocBytes,
-			runId,
-			stats,
-			writer
-		});
-		// Frontier discovery: only enqueue newly-discovered URLs while the switch is
-		// on. Off = keep draining what's already queued without growing the frontier.
-		if (discoveryEnabled) {
-			for (const t of targets) {
-				if (!seen.has(t)) {
-					queue.push(t);
-					stats.discovered++;
+				// Control: react to pause/cancel between requests.
+				const g = await gateControl(url);
+				if (g === 'canceled') {
+					await finish('canceled');
+					return 'done';
 				}
+				if (g === 'paused') {
+					// Un-consume this url so the next step re-processes it on resume.
+					seen.delete(url);
+					queue.unshift(url);
+					return 'paused';
+				}
+
+				if (!robots.canFetch(url)) {
+					await logEvent(runId, url, 'robots_blocked', null, null);
+					log.debug({ url }, 'robots blocked');
+					continue;
+				}
+
+				// Existing manifest row drives conditional GET + change detection.
+				const existing = await db
+					.select({
+						id: resource.id,
+						sha256: resource.sha256,
+						etag: resource.etag,
+						lastModified: resource.lastModified,
+						sizeBytes: resource.sizeBytes,
+						lastFetchedAt: resource.lastFetchedAt
+					})
+					.from(resource)
+					.where(eq(resource.url, url))
+					.limit(1);
+				const prev = existing[0];
+
+				// Plain crawl skips URLs already captured; recrawl/estimate re-check.
+				if (prev && prev.lastFetchedAt && mode === 'crawl') continue;
+
+				const headers: Record<string, string> = {};
+				if (prev && mode === 'recrawl') {
+					if (prev.etag) headers['If-None-Match'] = prev.etag;
+					if (prev.lastModified) headers['If-Modified-Since'] = prev.lastModified;
+				}
+
+				const { resp, throttled, error } = await politeFetch(url, headers);
+				stats.requestsMade++;
+				items++;
+				if (throttled) {
+					await logEvent(runId, url, 'throttled', null, null);
+					log.debug({ url }, 'throttled');
+				}
+
+				if (!resp) {
+					stats.errorCount++;
+					await logEvent(runId, url, 'fetch_error', null, error ?? 'no response');
+					log.warn({ url, error: error ?? 'no response' }, 'fetch error');
+					await recordFailure(runId, url, prev?.id, 0, 'error');
+					await politeDelay();
+					continue;
+				}
+				if (resp.status === 304) {
+					stats.unchangedCount++;
+					if (prev) await touchFetched(prev.id, runId);
+					resp.body?.cancel();
+					await politeDelay();
+					continue;
+				}
+				if (resp.status !== 200) {
+					resp.body?.cancel();
+					stats.errorCount++;
+					await logEvent(runId, url, 'http_error', resp.status, null);
+					log.warn({ url, status: resp.status }, 'http error');
+					if (resp.status === 404 || resp.status === 410) {
+						stats.goneCount++;
+						await recordGone(runId, url, prev?.id, resp.status);
+					} else {
+						await recordFailure(runId, url, prev?.id, resp.status, 'error');
+					}
+					await politeDelay();
+					continue;
+				}
+				stats.fetched++;
+				const targets = await ingestResponse(resp, {
+					url,
+					prevId: prev?.id,
+					prevSha: prev?.sha256 ?? null,
+					prevSize: prev?.sizeBytes ?? null,
+					mode,
+					maxDocBytes,
+					runId,
+					stats,
+					writer
+				});
+				// Frontier discovery: only enqueue newly-discovered URLs while the switch is
+				// on. Off = keep draining what's already queued without growing the frontier.
+				if (discoveryEnabled) {
+					for (const t of targets) {
+						if (!seen.has(t)) {
+							queue.push(t);
+							stats.discovered++;
+						}
+					}
+				}
+
+				await politeDelay();
 			}
+
+			await finish('completed');
+			return 'done';
 		}
-
-		await politeDelay();
-	}
-
-	// Backfill link targets to resource ids in one pass, then finalize.
-	await backfillLinkTargets();
-	await finalizeRun(runId, control === 'cancel' ? 'canceled' : 'completed', stats);
+	};
 }
 
 // ---------------------------------------------------------------------------
@@ -422,8 +503,17 @@ export async function executeRun(run: SyncRun, opts: { publish?: boolean } = {})
 // priority order, reschedules each with a per-tier TTL, and enqueues newly
 // discovered URLs as due-now — so core pages finish before the long tail, and
 // the run picks up exactly where it left off, only fetching what's stale.
+//
+// Because the frontier is the DB and every processed resource reschedules itself
+// (nextFetchAt in the future), the session is idempotent across `step()`
+// boundaries AND across process restarts: a step that ends mid-batch re-queries
+// due rows next time — already-done rows are no longer due, so nothing is
+// double-processed, and unchanged content produces no new version row (sha match).
 // ---------------------------------------------------------------------------
-export async function executeSync(run: SyncRun, opts: { publish?: boolean } = {}): Promise<void> {
+export async function createSyncSession(
+	run: SyncRun,
+	opts: { publish?: boolean } = {}
+): Promise<RunSession> {
 	const runId = run.id;
 	const maxPages = run.maxPages ?? MAX_PAGES;
 	const params = run.params ? (JSON.parse(run.params) as { maxDocBytes?: number }) : {};
@@ -441,8 +531,9 @@ export async function executeSync(run: SyncRun, opts: { publish?: boolean } = {}
 	// still fetches/refreshes known resources but ingests no newly-discovered URLs.
 	let discoveryEnabled = run.discoveryEnabled;
 	let lastBeat = 0;
-	// Forward-progress watermark for the stall marker (see executeRun.beat).
+	// Forward-progress watermark for the stall marker (see createCrawlSession.beat).
 	let lastProgress = -1;
+	let paused = false;
 	const workerId = run.workerId;
 
 	async function beat(currentUrl: string | null): Promise<void> {
@@ -458,20 +549,16 @@ export async function executeSync(run: SyncRun, opts: { publish?: boolean } = {}
 		}));
 	}
 
-	/** Wait out a pause; returns false if the run was canceled. */
-	async function awaitResume(url: string | null): Promise<boolean> {
-		while (control === 'pause') {
-			await db.update(syncRun).set({ status: 'paused' }).where(eq(syncRun.id, runId));
-			await Bun.sleep(1500);
-			lastBeat = 0;
-			await beat(url);
-			if (control === 'cancel') return false;
-			if (control !== 'pause') {
-				await db.update(syncRun).set({ status: 'running' }).where(eq(syncRun.id, runId));
-			}
-		}
-		return control !== 'cancel';
-	}
+	// See createCrawlSession.gateControl — heartbeat + pause/cancel classification,
+	// yielding instead of blocking on pause.
+	const gateControl = (url: string | null) =>
+		gate(
+			runId,
+			() => beat(url),
+			() => control,
+			() => paused,
+			(p) => (paused = p)
+		);
 
 	const schedule = (id: string, priority: number) =>
 		db
@@ -496,146 +583,221 @@ export async function executeSync(run: SyncRun, opts: { publish?: boolean } = {}
 
 	await refreshSeeds(runId, stats);
 
-	// Drain the due frontier in priority order until nothing is due (caught up).
-	while (stats.requestsMade < maxPages) {
-		await beat(null);
-		if (control === 'cancel' || !(await awaitResume(null))) break;
+	const finish = (status: string) => finishRun(runId, status, log, stats);
 
-		const batch = await db
-			.select({
-				id: resource.id,
-				url: resource.url,
-				priority: resource.priority,
-				sha256: resource.sha256,
-				etag: resource.etag,
-				lastModified: resource.lastModified,
-				sizeBytes: resource.sizeBytes
-			})
-			.from(resource)
-			.where(
-				and(
-					or(isNull(resource.nextFetchAt), lte(resource.nextFetchAt, new Date())),
-					ne(resource.state, 'gone')
+	/** Fetch the next page of due resources (priority-ordered). */
+	function dueBatch() {
+		return (
+			db
+				.select({
+					id: resource.id,
+					url: resource.url,
+					priority: resource.priority,
+					sha256: resource.sha256,
+					etag: resource.etag,
+					lastModified: resource.lastModified,
+					sizeBytes: resource.sizeBytes
+				})
+				.from(resource)
+				.where(
+					and(
+						or(isNull(resource.nextFetchAt), lte(resource.nextFetchAt, new Date())),
+						ne(resource.state, 'gone')
+					)
 				)
-			)
-			// Completeness before freshness: fetch never-seen URLs first (in priority
-			// order), then re-verify already-have ones. So we capture new content
-			// (e.g. thousands of documents) before re-checking pages we already hold.
-			.orderBy(
-				sql`${resource.lastFetchedAt} is null desc`,
-				asc(resource.priority),
-				asc(resource.nextFetchAt)
-			)
-			.limit(SYNC_BATCH);
-		if (batch.length === 0) break; // caught up
+				// Completeness before freshness: fetch never-seen URLs first (in priority
+				// order), then re-verify already-have ones. So we capture new content
+				// (e.g. thousands of documents) before re-checking pages we already hold.
+				.orderBy(
+					sql`${resource.lastFetchedAt} is null desc`,
+					asc(resource.priority),
+					asc(resource.nextFetchAt)
+				)
+				.limit(SYNC_BATCH)
+		);
+	}
 
-		for (const r of batch) {
-			if (stats.requestsMade >= maxPages) break;
-			await beat(r.url);
-			if (control === 'cancel' || !(await awaitResume(r.url))) break;
+	/** Fetch + record one due resource (the per-item body of the old inner loop). */
+	async function processResource(r: {
+		id: string;
+		url: string;
+		priority: number;
+		sha256: string | null;
+		etag: string | null;
+		lastModified: string | null;
+		sizeBytes: number | null;
+	}): Promise<void> {
+		if (!inScope(r.url)) {
+			await schedule(r.id, r.priority);
+			return;
+		}
+		if (!robots.canFetch(r.url)) {
+			await logEvent(runId, r.url, 'robots_blocked', null, null);
+			log.debug({ url: r.url }, 'robots blocked');
+			await schedule(r.id, r.priority);
+			return;
+		}
 
-			if (!inScope(r.url)) {
-				await schedule(r.id, r.priority);
-				continue;
-			}
-			if (!robots.canFetch(r.url)) {
-				await logEvent(runId, r.url, 'robots_blocked', null, null);
-				log.debug({ url: r.url }, 'robots blocked');
-				await schedule(r.id, r.priority);
-				continue;
-			}
+		// Always conditional-GET in sync (cheap 304s for unchanged content).
+		const headers: Record<string, string> = {};
+		if (r.etag) headers['If-None-Match'] = r.etag;
+		if (r.lastModified) headers['If-Modified-Since'] = r.lastModified;
 
-			// Always conditional-GET in sync (cheap 304s for unchanged content).
-			const headers: Record<string, string> = {};
-			if (r.etag) headers['If-None-Match'] = r.etag;
-			if (r.lastModified) headers['If-Modified-Since'] = r.lastModified;
+		const { resp, throttled, error } = await politeFetch(r.url, headers);
+		stats.requestsMade++;
+		if (throttled) {
+			await logEvent(runId, r.url, 'throttled', null, null);
+			log.debug({ url: r.url }, 'throttled');
+		}
 
-			const { resp, throttled, error } = await politeFetch(r.url, headers);
-			stats.requestsMade++;
-			if (throttled) {
-				await logEvent(runId, r.url, 'throttled', null, null);
-				log.debug({ url: r.url }, 'throttled');
-			}
-
-			if (!resp) {
-				stats.errorCount++;
-				await logEvent(runId, r.url, 'fetch_error', null, error ?? 'no response');
-				log.warn({ url: r.url, error: error ?? 'no response' }, 'fetch error');
-				await recordFailure(runId, r.url, r.id, 0, 'error');
+		if (!resp) {
+			stats.errorCount++;
+			await logEvent(runId, r.url, 'fetch_error', null, error ?? 'no response');
+			log.warn({ url: r.url, error: error ?? 'no response' }, 'fetch error');
+			await recordFailure(runId, r.url, r.id, 0, 'error');
+			await db
+				.update(resource)
+				.set({ nextFetchAt: new Date(Date.now() + SYNC_ERROR_BACKOFF_MS) })
+				.where(eq(resource.id, r.id));
+			await politeDelay();
+			return;
+		}
+		if (resp.status === 304) {
+			stats.unchangedCount++;
+			await touchFetched(r.id, runId);
+			await schedule(r.id, r.priority);
+			resp.body?.cancel();
+			await politeDelay();
+			return;
+		}
+		if (resp.status !== 200) {
+			resp.body?.cancel();
+			stats.errorCount++;
+			await logEvent(runId, r.url, 'http_error', resp.status, null);
+			log.warn({ url: r.url, status: resp.status }, 'http error');
+			if (resp.status === 404 || resp.status === 410) {
+				stats.goneCount++;
+				await recordGone(runId, r.url, r.id, resp.status);
+				// Gone: park it far in the future so it isn't re-fetched.
+				await db
+					.update(resource)
+					.set({ nextFetchAt: new Date(Date.now() + 365 * 86_400_000) })
+					.where(eq(resource.id, r.id));
+			} else {
+				await recordFailure(runId, r.url, r.id, resp.status, 'error');
 				await db
 					.update(resource)
 					.set({ nextFetchAt: new Date(Date.now() + SYNC_ERROR_BACKOFF_MS) })
 					.where(eq(resource.id, r.id));
-				await politeDelay();
-				continue;
-			}
-			if (resp.status === 304) {
-				stats.unchangedCount++;
-				await touchFetched(r.id, runId);
-				await schedule(r.id, r.priority);
-				resp.body?.cancel();
-				await politeDelay();
-				continue;
-			}
-			if (resp.status !== 200) {
-				resp.body?.cancel();
-				stats.errorCount++;
-				await logEvent(runId, r.url, 'http_error', resp.status, null);
-				log.warn({ url: r.url, status: resp.status }, 'http error');
-				if (resp.status === 404 || resp.status === 410) {
-					stats.goneCount++;
-					await recordGone(runId, r.url, r.id, resp.status);
-					// Gone: park it far in the future so it isn't re-fetched.
-					await db
-						.update(resource)
-						.set({ nextFetchAt: new Date(Date.now() + 365 * 86_400_000) })
-						.where(eq(resource.id, r.id));
-				} else {
-					await recordFailure(runId, r.url, r.id, resp.status, 'error');
-					await db
-						.update(resource)
-						.set({ nextFetchAt: new Date(Date.now() + SYNC_ERROR_BACKOFF_MS) })
-						.where(eq(resource.id, r.id));
-				}
-				await politeDelay();
-				continue;
-			}
-
-			stats.fetched++;
-			const discovered = await ingestResponse(resp, {
-				url: r.url,
-				prevId: r.id,
-				prevSha: r.sha256,
-				prevSize: r.sizeBytes,
-				mode: 'sync',
-				maxDocBytes,
-				runId,
-				stats,
-				writer
-			});
-			await schedule(r.id, r.priority);
-			// Frontier discovery: enqueue newly-found in-scope URLs only while the
-			// switch is on. When off, the fetch/refresh above still runs (drain the
-			// known backlog) but no new URLs enter the frontier, so totals stop growing.
-			if (discoveryEnabled) {
-				const fresh = discovered.filter((t) => !t.endsWith('sitemap.xml'));
-				await batchAll(fresh.map((t) => enqueueResourceStmt(t, runId)));
-				stats.discovered += fresh.length;
 			}
 			await politeDelay();
+			return;
 		}
-		if (control === 'cancel') break;
+
+		stats.fetched++;
+		const discovered = await ingestResponse(resp, {
+			url: r.url,
+			prevId: r.id,
+			prevSha: r.sha256,
+			prevSize: r.sizeBytes,
+			mode: 'sync',
+			maxDocBytes,
+			runId,
+			stats,
+			writer
+		});
+		await schedule(r.id, r.priority);
+		// Frontier discovery: enqueue newly-found in-scope URLs only while the
+		// switch is on. When off, the fetch/refresh above still runs (drain the
+		// known backlog) but no new URLs enter the frontier, so totals stop growing.
+		if (discoveryEnabled) {
+			const fresh = discovered.filter((t) => !t.endsWith('sitemap.xml'));
+			await batchAll(fresh.map((t) => enqueueResourceStmt(t, runId)));
+			stats.discovered += fresh.length;
+		}
+		await politeDelay();
 	}
 
-	await backfillLinkTargets();
-	await finalizeRun(runId, control === 'cancel' ? 'canceled' : 'completed', stats);
+	return {
+		run,
+		phase: 'sync',
+		async step(budget: StepBudget): Promise<StepResult> {
+			const deadline = Date.now() + budget.timeBudgetMs;
+			let items = 0;
+			// Drain the due frontier in priority order until nothing is due (caught up)
+			// or this step's budget is spent.
+			while (stats.requestsMade < maxPages) {
+				if (items >= budget.maxItems || Date.now() >= deadline) return 'more';
+
+				const g = await gateControl(null);
+				if (g === 'canceled') {
+					await finish('canceled');
+					return 'done';
+				}
+				if (g === 'paused') return 'paused';
+
+				const batch = await dueBatch();
+				if (batch.length === 0) {
+					await finish('completed');
+					return 'done'; // caught up
+				}
+
+				for (const r of batch) {
+					if (stats.requestsMade >= maxPages) break;
+					if (items >= budget.maxItems || Date.now() >= deadline) return 'more';
+
+					const gr = await gateControl(r.url);
+					if (gr === 'canceled') {
+						await finish('canceled');
+						return 'done';
+					}
+					if (gr === 'paused') return 'paused';
+
+					await processResource(r);
+					items++;
+				}
+			}
+
+			await finish('completed'); // hit maxPages
+			return 'done';
+		}
+	};
+}
+
+// Shared control gate for the crawl/sync sessions. Heartbeats (which reads back
+// `control`), then classifies: `canceled`, `paused` (flipping the run row to
+// paused once), or `proceed` (flipping back to running on resume). Unlike the old
+// in-loop wait, pause does NOT sleep here — it returns and lets the driver decide
+// when to re-tick, so the core stays free of process-lifecycle blocking.
+async function gate(
+	runId: string,
+	beat: () => Promise<void>,
+	getControl: () => string,
+	getPaused: () => boolean,
+	setPaused: (p: boolean) => void
+): Promise<'proceed' | 'paused' | 'canceled'> {
+	await beat();
+	const control = getControl();
+	if (control === 'cancel') return 'canceled';
+	if (control === 'pause') {
+		if (!getPaused()) {
+			await db.update(syncRun).set({ status: 'paused' }).where(eq(syncRun.id, runId));
+			setPaused(true);
+		}
+		return 'paused';
+	}
+	if (getPaused()) {
+		await db.update(syncRun).set({ status: 'running' }).where(eq(syncRun.id, runId));
+		setPaused(false);
+	}
+	return 'proceed';
 }
 
 /** Seed the frontier: module roots (tier 1) + sitemap core pages (tier 0).
  *  NOT gated by the discovery toggle — seeds/sitemap are the *known site
  *  structure* (the backlog to drain), a separate concern from frontier discovery,
  *  which is specifically the ingest of newly-found links from fetched page bodies
- *  (see the `discoveryEnabled` gate in executeSync). Seeds run once at run start
+ *  (see the `discoveryEnabled` gate in createSyncSession). Seeds run once at run start
  *  and are bounded, so they don't cause the runaway frontier growth the toggle
  *  exists to pause. */
 async function refreshSeeds(runId: string, stats: Stats): Promise<void> {

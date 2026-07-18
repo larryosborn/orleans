@@ -118,6 +118,80 @@ bun run worker --publish
 > Tell-tale: a `sync` run stuck in `current_phase='crawling'` with no tier-0
 > resources or unfetched frontier rows — that's an old worker.
 
+## Runtime seam: core `tick()` + drivers
+
+The execution model is split in two so the same crawl engine can run in very
+different environments (a long-lived box today; a serverless function tomorrow)
+without the engine knowing which. This is the SvelteKit-adapter idea applied to
+the worker: one portable **core**, swappable **drivers**.
+
+```
+  ┌──────────────────────────── core (env-agnostic) ────────────────────────────┐
+  │  worker/core.ts    tick(opts) -> { status: 'more' | 'idle' | 'done', … }     │
+  │  worker/crawl.ts   createCrawlSession / createSyncSession (bounded step())    │
+  │                                                                              │
+  │  One tick = claim-or-continue the active run, process ONE bounded batch      │
+  │  (capped by a max item count AND a soft wall-time budget), persist progress, │
+  │  honor control (pause/cancel/discovery), return. NO loop, NO signals, NO     │
+  │  wait-sleeps, NO process lifecycle. It does one unit and returns.            │
+  └──────────────────────────────────────────────────────────────────────────────┘
+                                     ▲  pumps
+  ┌──────────────────────────── driver (env-specific) ──────────────────────────┐
+  │  worker/driver.ts  makeLocalDriver — the long-lived `bun run worker` loop:   │
+  │    loop { maintenance-when-due; tick(); react to status } + idle sleeps +    │
+  │    SIGINT/SIGTERM graceful shutdown + registry active/standby transitions.   │
+  │  worker/index.ts   thin: build identity + budget, migrate, pick a driver.    │
+  └──────────────────────────────────────────────────────────────────────────────┘
+```
+
+**`tick()` status contract** — the whole seam:
+
+| status | meaning                                  | a driver typically…                     |
+| ------ | ---------------------------------------- | --------------------------------------- |
+| `more` | budget spent, work remains               | pumps again immediately                 |
+| `idle` | nothing to claim, or the run is paused   | waits (sleep / next cron) then re-ticks |
+| `done` | run reached a terminal state (finalized) | pumps again (claim the next run)        |
+
+Per-tick bounds are configurable — `WORKER_TICK_MAX_ITEMS` (item cap) and
+`WORKER_TICK_BUDGET_MS` (soft wall-time). The bounds only _chunk_ the work: the
+resulting rows/counts are identical to an unbounded loop, because every processed
+resource reschedules itself (`sync`) or is skipped as already-captured (`crawl`),
+and unchanged content produces no new version row (content-addressed sha compare).
+So a batch is safe to re-run — `tick()` advances **atomically and idempotently**
+(no duplicate `resource_version` rows, no double blob writes), which is also what
+keeps a future sharded/parallel driver from needing any core change.
+
+**Single-writer is unchanged.** Exactly one active run at a time via the Turso
+lease (`claimNext` + heartbeat, preserved verbatim in `core.ts`). The local driver
+keeps one warm in-process session across ticks, so the crawl BFS frontier
+(in-memory for `crawl`/`estimate`/`recrawl`) continues step to step. `sync` is the
+DB-resumable mode — the `resource` table _is_ the frontier — so it resumes across
+process restarts too.
+
+### Adding a serverless driver (future — NOT built here)
+
+The seam is shaped so a Cloudflare/Vercel driver drops in **without touching the
+core**. It composes the same primitives, but inverts the loop — the platform's
+scheduler _is_ the loop. A one-tick-per-invocation handler looks like:
+
+```ts
+// pseudo-code for a future serverless driver — do not ship yet
+export async function handler() {
+	await runMaintenance(identity, /* idle */ true); // reap/sweep/schedule
+	const r = await tick({ identity, publish, budget });
+	// 'more'  -> schedule an immediate follow-up invocation
+	// 'idle'  -> let the next cron tick handle it
+	// 'done'  -> lapse; the next queued run is picked up next invocation
+}
+```
+
+Because `sync` is DB-resumable and every processed row reschedules itself, one tick
+per invocation across fresh processes still converges on the same result — no
+shared in-process state required. `worker/driver.ts` exports the reusable
+primitives (`runMaintenance`, `reapStaleRuns`, `maybeScheduleSync`) alongside
+`makeLocalDriver`; a new driver reuses them and supplies only its own loop
+discipline and lifecycle.
+
 ## Blob storage: R2 canonical + opt-in publishing
 
 Bodies are stored content-addressed (by sha256). R2 is the **canonical durable
