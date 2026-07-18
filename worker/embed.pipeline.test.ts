@@ -137,4 +137,31 @@ describe('executeEmbed pipeline', () => {
 		expect(await chunkCount('r1')).toBe(0); // orphans cleared
 		expect(await chunkCount('r2')).toBe(r2Count); // unrelated resource intact
 	});
+
+	it('keeps nav/boilerplate chunks out of the index but retains content (#59)', async () => {
+		// A pure nav/index page (real How-Do-I index chunk): menu strip + link labels,
+		// no prose. Every chunk is low-signal, so none should reach `chunk`.
+		const NAV =
+			'Government Community Business Visiting Orleans How Do I... HomeHow Do I... A A ' +
+			'Employment Opportunities Beach and OSV Stickers Passports Building Permits ' +
+			'Senior Tax Work-Off Program Universal Pre-K Program Rental Registration ' +
+			'Departments & Staff Police Department Select Board Flood Map Information ' +
+			'Channel 1072 Live Stream CivicReady Emergency Alerts NotifyMe Website ' +
+			'Notifications EyeOnWater Voting Recreation Activities Video Archive Requests';
+		await seedResource('r3', 'https://x/how-do-i', 'How Do I');
+		await seedText('r3', 'shaC', 'ok', NAV);
+		// A genuine FAQ answer alongside it — must be retained.
+		await seedResource('r4', 'https://x/faq', 'FAQ');
+		await seedText(
+			'r4',
+			'shaD',
+			'ok',
+			'An abatement is a reduction in your property assessment that you can apply for if ' +
+				'you believe that assessment does not accurately reflect the market value of your home.'
+		);
+		await embedRun();
+
+		expect(await chunkCount('r3')).toBe(0); // all nav chunks filtered out
+		expect(await chunkCount('r4')).toBeGreaterThan(0); // real content retained
+	});
 });

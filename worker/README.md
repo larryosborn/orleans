@@ -85,6 +85,19 @@ column width. A model with a different dimensionality needs a new migration
 (vector columns are fixed-width) — see `EMBED_DIM` in
 [`crawl.schema.ts`](../src/lib/server/db/crawl.schema.ts).
 
+**Boilerplate filter (#59).** Nav-heavy CivicPlus landing/index pages leak menu,
+link-list, form, and contact-footer chrome through extraction. Before embedding,
+each chunk is scored for **content density** — its function-word (stopword) ratio,
+see [`worker/boilerplate.ts`](boilerplate.ts) — and chunks below
+`EMBED_MIN_STOPWORD_RATIO` (default `0.2`) are dropped so those near-duplicate
+low-signal snippets never enter the `chunk` index or dilute retrieval. Genuine
+prose (FAQ answers, policy text, news) sits well above the floor; nav/label chrome
+sits near zero. Set the knob to `0` to disable. Filtering happens at chunk time, so
+the raw `resource_text` is untouched. A page whose chunks are _all_ boilerplate (a
+pure index page) yields zero chunks; it stays selectable by the freshness
+predicate, so a re-run re-chunks + re-filters it cheaply (no embedding calls, no
+writes) rather than being a strict no-op — content resources settle normally.
+
 **Document size limit.** In `crawl`/`recrawl`, HTML is always downloaded but large
 binaries can be skipped: `CRAWLER_MAX_DOC_BYTES` (env default) or per-run
 `params.maxDocBytes` (the dashboard's "Max file size, MB"). Docs over the limit are

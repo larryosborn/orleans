@@ -154,6 +154,14 @@ export const CHUNK_MAX_CHARS = Number(process.env.EMBED_CHUNK_CHARS ?? 1200);
 export const CHUNK_OVERLAP_CHARS = Number(process.env.EMBED_CHUNK_OVERLAP ?? 200);
 // How many chunks to send to the embedding model per request (batching).
 export const EMBED_BATCH = Number(process.env.EMBED_BATCH ?? 32);
+// Boilerplate/low-signal chunk filter (#59). A chunk whose content density —
+// measured as its function-word (stopword) ratio, see worker/boilerplate.ts — is
+// below this floor is treated as nav/menu/link-list/form chrome and kept OUT of
+// the `chunk` index, so those near-duplicate low-signal snippets don't pollute
+// retrieval. Genuine prose (FAQ answers, policy text, news) sits well above it
+// (~0.25–0.50 on the real Orleans corpus) while nav/label chrome sits near zero,
+// so 0.2 separates them with margin. Set to 0 to disable the filter entirely.
+export const CHUNK_MIN_STOPWORD_RATIO = Number(process.env.EMBED_MIN_STOPWORD_RATIO ?? 0.2);
 // Which embedding provider to use: 'cloudflare' | 'openai' | 'fake'. Unset =
 // auto-detect from available credentials, falling back to the deterministic
 // 'fake' embedder (so the pipeline runs offline / in CI). See selectEmbedder().
