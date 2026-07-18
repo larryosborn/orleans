@@ -106,6 +106,26 @@ export const SYNC_BATCH = Number(process.env.CRAWLER_SYNC_BATCH ?? 200);
 export const SYNC_ERROR_BACKOFF_MS =
 	Number(process.env.CRAWLER_ERROR_BACKOFF_HOURS ?? 6) * 3_600_000;
 
+// ---------------------------------------------------------------------------
+// Tick budget (the resumable core, worker/core.ts)
+// ---------------------------------------------------------------------------
+// A single `tick()` processes ONE bounded batch of frontier work and returns —
+// bounded by BOTH a max item count AND a soft wall-time budget (whichever trips
+// first). This is what makes the core resumable and driver-agnostic: a long-lived
+// local driver pumps many ticks back-to-back; a serverless driver would run one
+// tick per invocation. The bounds only chunk the work — the resulting rows/counts
+// are identical to an unbounded loop, because each processed resource reschedules
+// itself (see executeSync's freshness scheduling), so tick boundaries never
+// double-process or drop work.
+export const TICK_MAX_ITEMS = Number(process.env.WORKER_TICK_MAX_ITEMS ?? 200);
+export const TICK_TIME_BUDGET_MS = Number(process.env.WORKER_TICK_BUDGET_MS ?? 10_000);
+
+// Local-driver loop cadence (worker/driver.ts). How long to sleep when the core
+// reports `idle` (nothing to claim), and how often to run maintenance (reap stale
+// runs, sweep the worker registry, refresh standby, auto-schedule).
+export const POLL_INTERVAL_MS = Number(process.env.WORKER_POLL_MS ?? 3000);
+export const MAINTENANCE_INTERVAL_MS = Number(process.env.WORKER_MAINTENANCE_MS ?? 30_000);
+
 // Auto-schedule: when > 0, an idle worker enqueues a `sync` run this often.
 // 0 / unset = disabled (only manual/dashboard runs). See worker/index.ts.
 export const SYNC_SCHEDULE_MS = Number(process.env.SYNC_SCHEDULE_MINUTES ?? 0) * 60_000;
