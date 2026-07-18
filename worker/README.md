@@ -123,14 +123,15 @@ bun run worker --publish
 Bodies are stored content-addressed (by sha256). R2 is the **canonical durable
 archive**, but publishing to it is **opt-in**:
 
-- **local** — `.cache/blobs` (or `BLOB_DIR`). The dev/staging store. Every crawl
-  writes new bytes here first.
-- **r2** — Cloudflare R2. Written **through** only when the worker runs with
-  `--publish` (prod passes it). A default run holds blobs local-only, so a
-  dev/experimental crawl can't pollute the archive.
+- **local** — `.cache/blobs` (or `BLOB_DIR`). The dev/staging store. An
+  unpublished crawl writes new bytes here only.
+- **r2** — Cloudflare R2. Written **only** (no local copy) when the worker runs
+  with `--publish` (prod passes it). A default run holds blobs local-only, so a
+  dev/experimental crawl can't pollute the archive; a publishing run writes no
+  local files, so it needs no filesystem (runs on a no-fs host).
 
 `blob.r2_synced_at` is the publish marker — null until an object is confirmed in
-R2, then stamped (on a `--publish` write-through or a `blobs:push` promotion). It
+R2, then stamped (on a `--publish` R2 write or a `blobs:push` promotion). It
 doubles as the held/pending-publish queue (`r2_synced_at IS NULL`).
 
 Because keys are immutable, promoting/reconciling is a plain copy-what's-missing —

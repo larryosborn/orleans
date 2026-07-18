@@ -109,23 +109,25 @@ This is the cheapest way to archive the text/HTML while deferring multi-MB PDFs.
 ## 5. Blob storage: R2 canonical + opt-in publishing
 
 Bodies are content-addressed: `blobs/<ab>/<cd>/<sha256><ext>`. There are two
-backends, but they are **not** interchangeable targets picked by a switch —
-they're layered:
+backends, picked by the publish flag (never both in one run):
 
 - **local** — a filesystem dir (`.cache/blobs`, or `BLOB_DIR`). The dev/staging
-  store. Every crawl writes new bytes here first.
+  store. An unpublished crawl writes new bytes here only.
 - **r2** — Cloudflare R2 (S3-compatible), the **canonical durable archive**.
 
-**Publishing to R2 is opt-in.** The crawler always writes new blobs to the local
-backend; it only writes **through** to R2 when the worker runs with `--publish`
-(prod runs pass it). A default (unpublished) run therefore never touches R2, so a
-dev/experimental crawl can't pollute the canonical archive. This is a write-path
-policy, not a read cache — nothing in the app reads blob bytes on the hot path, so
-there is no prod read-through cache.
+**Publishing to R2 is opt-in.** Without `--publish` the crawler writes new blobs
+to the local backend **only** (`r2_synced_at` null, promotable later via
+`blobs:push`). With `--publish` (prod runs pass it) new blobs go to R2 **only** —
+no local copy is written — and are stamped `r2_synced_at`. A default (unpublished)
+run therefore never touches R2, so a dev/experimental crawl can't pollute the
+canonical archive; and a publishing run writes no local files, so it needs no
+filesystem and runs on a no-fs host without accumulating dead disk copies that
+nothing reads. This is a write-path policy, not a read cache — nothing in the app
+reads blob bytes on the hot path, so there is no prod read-through cache.
 
 `blob.r2_synced_at` (nullable timestamp) is the publish marker: **null until the
 object is confirmed present in R2**, then stamped. It's set on a successful
-`--publish` write-through and on a `blobs:push` promotion. Because it doubles as
+`--publish` R2 write and on a `blobs:push` promotion. Because it doubles as
 the "held / pending publish" queue, `r2_synced_at IS NULL` is exactly the set of
 blobs that exist only locally. The read model `getUnpublishedBlobCount()`
 (`src/lib/server/sync.ts`) exposes that backlog.
@@ -211,8 +213,8 @@ Default seeded login (local/mock DB): `admin@example.com` / `password`.
    the dashboard can presign archived copies (§5). Tables auto-create on first request.
 2. Blob store → create an R2 bucket + token, set `R2_*` (see below).
 3. Worker → run `bun run worker --publish` on an always-on host with the same
-   `DATABASE_URL`/`DATABASE_AUTH_TOKEN` + `R2_*`. `--publish` writes blobs through
-   to R2 (the canonical archive); without it the worker holds blobs local-only.
+   `DATABASE_URL`/`DATABASE_AUTH_TOKEN` + `R2_*`. `--publish` writes blobs to R2
+   only (the canonical archive); without it the worker holds blobs local-only.
    Drive it from `/dashboard`.
 
 ---
@@ -221,22 +223,22 @@ Default seeded login (local/mock DB): `admin@example.com` / `password`.
 
 Full list in [`.env.example`](../.env.example).
 
-| Var                                                                       | Used by      | Notes                                                                                                                |
-| ------------------------------------------------------------------------- | ------------ | -------------------------------------------------------------------------------------------------------------------- |
-| `DATABASE_URL`                                                            | app + worker | Turso `libsql://…` (or `file:` locally)                                                                              |
-| `DATABASE_AUTH_TOKEN`                                                     | app + worker | Required for remote Turso                                                                                            |
-| `ORIGIN`, `BETTER_AUTH_SECRET`                                            | app          | Auth                                                                                                                 |
-| `--publish` (CLI flag, not env)                                           | worker       | Write blobs through to R2 (canonical archive) + stamp `r2_synced_at`. Default off = local-only (§5). Prod passes it. |
-| `BLOB_DIR`                                                                | worker       | Local cache dir (default `.cache/blobs`)                                                                             |
-| `R2_ENDPOINT` / `R2_BUCKET` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | worker + app | Cloudflare R2 (S3 API). Worker for crawl/recrawl + `blobs:*`; the app presigns them to view archived copies (§5).    |
-| `CRAWLER_USER_AGENT`                                                      | worker       | How the crawler identifies itself (see §13).                                                                         |
-| `CRAWLER_RATE_LIMIT` / `CRAWLER_RATE_LIMIT_JITTER`                        | worker       | Base seconds between requests + random extra 0..N (non-periodic).                                                    |
-| `CRAWLER_MAX_PAGES`                                                       | worker       | Hard safety cap per run.                                                                                             |
-| `CRAWLER_MAX_DOC_BYTES`                                                   | worker       | Skip downloading docs over N bytes (0 = pages-only). See §4.                                                         |
-| `CRAWLER_SEEDS`                                                           | worker       | Comma-separated paths/URLs to override the default seeds.                                                            |
-| `CRAWLER_TTL_{CORE,PAGE,AGENDA,DOC}_DAYS`                                 | worker       | `sync` per-tier freshness TTLs (default 7/7/30/180). See §11.                                                        |
-| `CRAWLER_SYNC_BATCH` / `CRAWLER_ERROR_BACKOFF_HOURS`                      | worker       | `sync` claim batch size / failed-URL re-schedule delay.                                                              |
-| `SYNC_SCHEDULE_MINUTES` / `WORKER_STALE_MINUTES`                          | worker       | Auto-enqueue `sync` this often (0=off); reap crashed runs. §11.                                                      |
+| Var                                                                       | Used by      | Notes                                                                                                                            |
+| ------------------------------------------------------------------------- | ------------ | -------------------------------------------------------------------------------------------------------------------------------- |
+| `DATABASE_URL`                                                            | app + worker | Turso `libsql://…` (or `file:` locally)                                                                                          |
+| `DATABASE_AUTH_TOKEN`                                                     | app + worker | Required for remote Turso                                                                                                        |
+| `ORIGIN`, `BETTER_AUTH_SECRET`                                            | app          | Auth                                                                                                                             |
+| `--publish` (CLI flag, not env)                                           | worker       | Write blobs to R2 only (canonical archive) + stamp `r2_synced_at`; no local copy. Default off = local-only (§5). Prod passes it. |
+| `BLOB_DIR`                                                                | worker       | Local cache dir (default `.cache/blobs`)                                                                                         |
+| `R2_ENDPOINT` / `R2_BUCKET` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | worker + app | Cloudflare R2 (S3 API). Worker for crawl/recrawl + `blobs:*`; the app presigns them to view archived copies (§5).                |
+| `CRAWLER_USER_AGENT`                                                      | worker       | How the crawler identifies itself (see §13).                                                                                     |
+| `CRAWLER_RATE_LIMIT` / `CRAWLER_RATE_LIMIT_JITTER`                        | worker       | Base seconds between requests + random extra 0..N (non-periodic).                                                                |
+| `CRAWLER_MAX_PAGES`                                                       | worker       | Hard safety cap per run.                                                                                                         |
+| `CRAWLER_MAX_DOC_BYTES`                                                   | worker       | Skip downloading docs over N bytes (0 = pages-only). See §4.                                                                     |
+| `CRAWLER_SEEDS`                                                           | worker       | Comma-separated paths/URLs to override the default seeds.                                                                        |
+| `CRAWLER_TTL_{CORE,PAGE,AGENDA,DOC}_DAYS`                                 | worker       | `sync` per-tier freshness TTLs (default 7/7/30/180). See §11.                                                                    |
+| `CRAWLER_SYNC_BATCH` / `CRAWLER_ERROR_BACKOFF_HOURS`                      | worker       | `sync` claim batch size / failed-URL re-schedule delay.                                                                          |
+| `SYNC_SCHEDULE_MINUTES` / `WORKER_STALE_MINUTES`                          | worker       | Auto-enqueue `sync` this often (0=off); reap crashed runs. §11.                                                                  |
 
 ---
 

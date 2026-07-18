@@ -3,12 +3,12 @@
 //   • local  — a filesystem directory (the dev/staging store; no egress cost)
 //   • r2     — Cloudflare R2 (S3-compatible; the canonical durable archive)
 //
-// They are not interchangeable targets picked by a switch. New bytes always land
-// in local; R2 is written *through* only when publishing is enabled (see
-// makeBlobWriter + the --publish flag). Objects are keyed by sha256, so content
-// is immutable and identical bytes dedupe to one object — and because keys never
-// change meaning, promoting/reconciling is a plain copy-what's-missing (see
-// sync-blobs.ts).
+// They are not interchangeable targets picked by a switch. Without publishing,
+// new bytes land in local only; when publishing is enabled they go to R2 only
+// (no local copy — see makeBlobWriter + the --publish flag). Objects are keyed by
+// sha256, so content is immutable and identical bytes dedupe to one object — and
+// because keys never change meaning, promoting/reconciling is a plain
+// copy-what's-missing (see sync-blobs.ts).
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { S3Client } from 'bun';
@@ -122,17 +122,19 @@ export function localDir(): string {
 // ---------------------------------------------------------------------------
 // Blob write path (the crawler's view of storage)
 // ---------------------------------------------------------------------------
-// R2 is the canonical durable archive, but publishing to it is *opt-in*. The
-// crawler ALWAYS writes new bytes to the local backend (the dev/staging cache);
-// only when publishing is enabled does it ALSO write-through to R2 and report
-// the object as synced (which stamps `blob.r2_synced_at`). A default run never
-// touches R2, so a dev/experimental crawl can't pollute the canonical archive.
+// R2 is the canonical durable archive, but publishing to it is *opt-in*. Without
+// publishing the crawler writes new bytes to the local backend only (the
+// dev/staging cache, `r2_synced_at` null, promotable later via blobs:push). When
+// publishing is enabled it writes new bytes to R2 ONLY — no local copy — and
+// reports the object as synced (which stamps `blob.r2_synced_at`). A default run
+// never touches R2, so a dev/experimental crawl can't pollute the canonical
+// archive; a publishing run needs no filesystem, so it runs on a no-fs host.
 export interface BlobWriter {
 	/** True when this run writes through to R2 (prod / `--publish`). */
 	readonly publish: boolean;
 	readonly label: string;
-	/** Store bytes under the content-addressed key. Always writes to the local
-	 *  backend; when publishing, also writes-through to R2. Returns the key and
+	/** Store bytes under the content-addressed key. When publishing, writes to R2
+	 *  only; otherwise writes to the local backend only. Returns the key and
 	 *  whether the object is confirmed present in R2 (drives `blob.r2_synced_at`). */
 	putIfAbsent(
 		sha256: string,
@@ -146,26 +148,28 @@ export interface BlobWriter {
 	ensurePublished(key: string, bytes: Uint8Array, contentType?: string): Promise<boolean>;
 }
 
-/** Build the crawler's blob write path. `publish` gates the R2 write-through
- *  ONLY — the local backend is always written. Publishing requires R2 env. */
+/** Build the crawler's blob write path. `publish` selects the backend: publishing
+ *  writes to R2 ONLY (no local copy), otherwise the local backend ONLY. Publishing
+ *  requires R2 env. */
 export function makeBlobWriter(opts: { publish: boolean }): BlobWriter {
-	const local = makeLocalStorage(localDir());
 	const r2 = opts.publish ? makeR2Storage() : null;
 	if (opts.publish && !r2) {
 		throw new Error(
 			'--publish requires R2_* env vars (R2_ENDPOINT / R2_BUCKET / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY).'
 		);
 	}
+	// Exactly one backend for this run: R2 when publishing, else local. The local
+	// backend is never even constructed in publish mode (no fs dependency there).
+	const backend: Storage = r2 ?? makeLocalStorage(localDir());
 	return {
 		publish: opts.publish,
 		label: r2
-			? `${local.label} + write-through to ${r2.label}`
-			: `${local.label} — local-only (unpublished; pass --publish to write through to R2)`,
+			? `R2-only → ${r2.label} (publishing; no local copy)`
+			: `${backend.label} — local-only (unpublished; pass --publish to write to R2)`,
 		async putIfAbsent(sha256, ext, bytes, contentType) {
-			const key = await local.putIfAbsent(sha256, ext, bytes, contentType);
-			if (!r2) return { key, r2Synced: false };
-			await r2.putIfAbsent(sha256, ext, bytes, contentType);
-			return { key, r2Synced: true };
+			const key = await backend.putIfAbsent(sha256, ext, bytes, contentType);
+			// r2Synced iff the (sole) backend is R2 and the write succeeded.
+			return { key, r2Synced: r2 !== null };
 		},
 		async ensurePublished(key, bytes, contentType) {
 			if (!r2) return false;
