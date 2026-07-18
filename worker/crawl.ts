@@ -261,6 +261,20 @@ function logRunSummary(log: ReturnType<typeof runLogger>, status: string, stats:
 	);
 }
 
+// Terminal step for both crawl-family and sync sessions: resolve link targets to
+// resource ids in one pass, finalize the run row, and log the rollup (except when
+// canceled). Shared so the two sessions can't drift on how a run ends.
+async function finishRun(
+	runId: string,
+	status: string,
+	log: ReturnType<typeof runLogger>,
+	stats: Stats
+): Promise<void> {
+	await backfillLinkTargets();
+	await finalizeRun(runId, status, stats);
+	if (status !== 'canceled') logRunSummary(log, status, stats);
+}
+
 // ---------------------------------------------------------------------------
 // crawl / estimate / recrawl — in-memory BFS frontier, as a resumable session.
 //
@@ -352,12 +366,7 @@ export async function createCrawlSession(
 		})
 		.where(eq(syncRun.id, runId));
 
-	async function finish(status: string): Promise<void> {
-		// Backfill link targets to resource ids in one pass, then finalize.
-		await backfillLinkTargets();
-		await finalizeRun(runId, status, stats);
-		if (status !== 'canceled') logRunSummary(log, status, stats);
-	}
+	const finish = (status: string) => finishRun(runId, status, log, stats);
 
 	return {
 		run,
@@ -574,11 +583,7 @@ export async function createSyncSession(
 
 	await refreshSeeds(runId, stats);
 
-	async function finish(status: string): Promise<void> {
-		await backfillLinkTargets();
-		await finalizeRun(runId, status, stats);
-		if (status !== 'canceled') logRunSummary(log, status, stats);
-	}
+	const finish = (status: string) => finishRun(runId, status, log, stats);
 
 	/** Fetch the next page of due resources (priority-ordered). */
 	function dueBatch() {
@@ -792,7 +797,7 @@ async function gate(
  *  NOT gated by the discovery toggle — seeds/sitemap are the *known site
  *  structure* (the backlog to drain), a separate concern from frontier discovery,
  *  which is specifically the ingest of newly-found links from fetched page bodies
- *  (see the `discoveryEnabled` gate in executeSync). Seeds run once at run start
+ *  (see the `discoveryEnabled` gate in createSyncSession). Seeds run once at run start
  *  and are bounded, so they don't cause the runaway frontier growth the toggle
  *  exists to pause. */
 async function refreshSeeds(runId: string, stats: Stats): Promise<void> {

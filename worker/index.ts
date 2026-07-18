@@ -22,7 +22,7 @@ import { client, db } from './db';
 import { syncRun } from '../src/lib/server/db/schema';
 import { applyMigrations } from '../src/lib/server/db/migrator';
 import { DEFAULT_BUDGET } from './core';
-import { makeLocalDriver, runToCompletion, type DriverContext } from './driver';
+import { makeLocalDriver, runSingleJob, type DriverContext } from './driver';
 import type { WorkerIdentity } from './registry';
 import { workerLogger } from './log';
 
@@ -51,7 +51,7 @@ async function enqueueAndRunOnce(
 	await db
 		.insert(syncRun)
 		.values({ mode, maxPages: maxPages ?? null, status: 'queued', requestedBy: 'cli' });
-	await runToCompletion(ctx);
+	await runSingleJob(ctx);
 }
 
 function parseArgs(argv: string[]): {

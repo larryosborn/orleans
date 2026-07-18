@@ -186,20 +186,20 @@ async function runLocalDriver(ctx: DriverContext): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// One-shot pump — the CLI (`--mode X --once`). Drains the core to completion with
-// no loop-forever, no signals, no maintenance: just pump `tick()` until there's no
-// more work. Used after enqueueing a single run.
+// One-shot pump — the CLI (`--mode X --once`). Pumps `tick()` to drive EXACTLY
+// ONE run to completion, then returns — matching the old enqueueAndRunOnce, which
+// claimed+ran a single row and exited. No loop-forever, no signals, no
+// maintenance. It does NOT drain other queued runs (a scheduler/dashboard row is
+// left for the long-running driver).
 // ---------------------------------------------------------------------------
-export async function runToCompletion(ctx: DriverContext): Promise<void> {
+export async function runSingleJob(ctx: DriverContext): Promise<void> {
 	const { identity, publish } = ctx;
 	const budget = ctx.budget ?? DEFAULT_BUDGET;
 	for (;;) {
 		const r = await tick({ identity, publish, budget });
-		// No work left to claim → done draining.
-		if (r.status === 'idle' && !r.runId) return;
-		// A one-shot run should never be paused (nothing drives the dashboard here);
-		// if it somehow is, bail rather than hot-spin.
-		if (r.status === 'idle' && r.runId) return;
-		// 'more' / 'done' → keep pumping (each tick does real, rate-limited work).
+		// `done` = the one claimed run finished → exit (don't claim the next).
+		// `idle` = nothing claimable (e.g. another worker holds the single-writer
+		// lease) → exit rather than hot-spin. Only `more` keeps pumping.
+		if (r.status === 'done' || r.status === 'idle') return;
 	}
 }

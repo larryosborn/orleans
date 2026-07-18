@@ -58,7 +58,7 @@ export const resource = sqliteTable(
 		state: text('state').notNull().default('active'), // active | gone | error
 		// frontier scheduling: priority tier (0=core sitemap page … 3=doc) and when
 		// this URL is next due for (re)fetch. Drives the resumable, freshness-aware
-		// `sync` mode — see worker/crawl.ts executeSync.
+		// `sync` mode — see worker/crawl.ts createSyncSession.
 		priority: integer('priority').notNull().default(1),
 		nextFetchAt: integer('next_fetch_at', { mode: 'timestamp_ms' }),
 		// latest observed content fingerprint

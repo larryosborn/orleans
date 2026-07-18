@@ -115,7 +115,7 @@ export const SYNC_ERROR_BACKOFF_MS =
 // local driver pumps many ticks back-to-back; a serverless driver would run one
 // tick per invocation. The bounds only chunk the work — the resulting rows/counts
 // are identical to an unbounded loop, because each processed resource reschedules
-// itself (see executeSync's freshness scheduling), so tick boundaries never
+// itself (see createSyncSession's freshness scheduling), so tick boundaries never
 // double-process or drop work.
 export const TICK_MAX_ITEMS = Number(process.env.WORKER_TICK_MAX_ITEMS ?? 200);
 export const TICK_TIME_BUDGET_MS = Number(process.env.WORKER_TICK_BUDGET_MS ?? 10_000);
