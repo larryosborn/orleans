@@ -16,6 +16,7 @@ import { chunk, crawlEvent, resource, resourceText, syncRun } from '../src/lib/s
 import type { SyncRun } from '../src/lib/server/db/crawl.schema';
 import { EMBED_BATCH } from './config';
 import { chunkText } from './chunk';
+import { isBoilerplateChunk } from './boilerplate';
 import { selectEmbedder, type Embedder } from './embeddings';
 import { refreshActiveWorker } from './registry';
 import { runLogger } from './log';
@@ -29,15 +30,26 @@ interface EmbedStats {
 	rebuilt: number; // resources chunked + embedded
 	cleared: number; // resources whose (now non-ok) chunks were removed
 	chunks: number; // chunk rows written
+	filtered: number; // low-signal/boilerplate chunks dropped before embedding (#59)
 	errors: number;
 }
 
 function zero(): EmbedStats {
-	return { processed: 0, rebuilt: 0, cleared: 0, chunks: 0, errors: 0 };
+	return { processed: 0, rebuilt: 0, cleared: 0, chunks: 0, filtered: 0, errors: 0 };
 }
 
 /** Rebuild one resource's chunks: delete existing, then chunk + embed + insert.
- *  Returns the number of chunk rows written. */
+ *  Returns the number of chunk rows written and the number of low-signal chunks
+ *  dropped by the boilerplate filter (#59). Boilerplate chunks are removed BEFORE
+ *  embedding, so nav/menu chrome never reaches the model or the `chunk` index and
+ *  the raw `resource_text` it came from stays untouched.
+ *
+ *  A resource whose chunks are ALL boilerplate (e.g. a pure nav/index page)
+ *  yields zero surviving chunks: any prior chunks are cleared and nothing is
+ *  inserted. Such a resource stays selectable by the freshness predicate (which
+ *  keys off chunk existence), so a re-run re-chunks + re-filters it — cheap, no
+ *  embedding calls, no writes — rather than being a strict no-op. Genuine content
+ *  resources (with surviving chunks) settle normally and are never reprocessed. */
 async function rebuildResource(
 	row: {
 		resourceId: string;
@@ -48,8 +60,11 @@ async function rebuildResource(
 		kind: string;
 	},
 	embedder: Embedder
-): Promise<number> {
-	const pieces = chunkText(row.text);
+): Promise<{ written: number; filtered: number }> {
+	const all = chunkText(row.text);
+	// Drop low-signal boilerplate (nav/menu/link-list/form chrome) before embedding.
+	const pieces = all.filter((p) => !isBoilerplateChunk(p.text));
+	const filtered = all.length - pieces.length;
 
 	const now = new Date();
 	// Embed OUTSIDE the transaction — it's the slow, network-bound part, and we
@@ -86,7 +101,7 @@ async function rebuildResource(
 			await tx.insert(chunk).values(pending.slice(i, i + INSERT_CHUNK_ROWS));
 		}
 	});
-	return pending.length;
+	return { written: pending.length, filtered };
 }
 
 export async function executeEmbed(
@@ -184,7 +199,7 @@ export async function executeEmbed(
 
 			try {
 				if (r.status === 'ok') {
-					const n = await rebuildResource(
+					const { written, filtered } = await rebuildResource(
 						{
 							resourceId: r.resourceId,
 							sha256: r.sha256,
@@ -196,7 +211,8 @@ export async function executeEmbed(
 						embedder
 					);
 					stats.rebuilt++;
-					stats.chunks += n;
+					stats.chunks += written;
+					stats.filtered += filtered;
 				} else {
 					// content no longer extractable — drop its now-orphan chunks.
 					await db.delete(chunk).where(eq(chunk.resourceId, r.resourceId));
@@ -240,6 +256,7 @@ export async function executeEmbed(
 			processed: stats.processed,
 			rebuilt: stats.rebuilt,
 			chunks: stats.chunks,
+			filtered: stats.filtered,
 			cleared: stats.cleared,
 			errors: stats.errors
 		},
