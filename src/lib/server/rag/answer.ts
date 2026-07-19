@@ -25,11 +25,8 @@
 //     records" label, whether or not the model remembered to add it.
 //   • Mode is validated to the three-value enum; anything else degrades to
 //     `abstained` (the safe default — never assert an unsupported specific).
-import {
-	retrieve as defaultRetrieve,
-	type RetrievalResult,
-	type RetrieveOptions
-} from './retrieve';
+import { type RetrievalResult, type RetrieveOptions } from './retrieve';
+import { selectRetriever } from './provider';
 import {
 	selectLlm,
 	defaultAnswerModel,
@@ -56,7 +53,8 @@ export interface AnswerOptions {
 	model?: string;
 	/** Output cap passed to the model. Defaults to `DEFAULT_MAX_TOKENS`. */
 	maxTokens?: number;
-	/** Inject a retrieval fn (tests / seeded corpus). Defaults to #36's `retrieve()`. */
+	/** Inject a retrieval fn (tests / seeded corpus). Defaults to the provider
+	 *  selected by `RETRIEVAL_PROVIDER` (vectorize `retrieve()` or ai-search). */
 	retrieve?: (question: string, opts?: RetrieveOptions) => Promise<RetrievalResult>;
 	/** Options forwarded to the retrieval fn (topK, injected client/embedder, …). */
 	retrieveOptions?: RetrieveOptions;
@@ -75,7 +73,7 @@ export async function answer(question: string, opts: AnswerOptions = {}): Promis
 	// spend an embed + vector query on retrieval we'd then throw away.
 	const llm = selectLlm(opts.llm);
 
-	const retrieveFn = opts.retrieve ?? defaultRetrieve;
+	const retrieveFn = opts.retrieve ?? selectRetriever();
 	const retrieval = await retrieveFn(question, opts.retrieveOptions);
 	const retrievedUrls = retrieval.sources.map((s) => s.url);
 
