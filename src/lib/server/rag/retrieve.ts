@@ -69,8 +69,10 @@ export interface RetrieveOptions {
 	client?: Client;
 }
 
-const DEFAULT_TOP_K = 8;
-const DEFAULT_MAX_PER_RESOURCE = 3;
+/** Default passage count + per-source cap. Exported so an alternate provider
+ *  (rag/search.ts) trims to the SAME defaults and the two can't drift apart. */
+export const DEFAULT_TOP_K = 8;
+export const DEFAULT_MAX_PER_RESOURCE = 3;
 const CANDIDATE_MULTIPLIER = 5;
 
 interface CandidateRow {

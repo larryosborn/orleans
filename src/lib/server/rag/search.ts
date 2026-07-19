@@ -26,18 +26,19 @@
 import {
 	assembleContext,
 	dedupeSources,
+	DEFAULT_MAX_PER_RESOURCE,
+	DEFAULT_TOP_K,
 	type Passage,
 	type RetrievalResult,
 	type RetrieveOptions,
 	type Source
 } from './retrieve';
 
+// DEFAULT_TOP_K / DEFAULT_MAX_PER_RESOURCE are imported from retrieve.ts (not
+// re-declared) so both providers trim to the same defaults and can't drift apart.
+
 /** Cloudflare REST API base. Overridable for tests (point at a fake server). */
 const CF_API_BASE = 'https://api.cloudflare.com/client/v4';
-const DEFAULT_TOP_K = 8;
-/** Cap passages per source document so one long page can't dominate — mirrors
- *  retrieve.ts's DEFAULT_MAX_PER_RESOURCE so the two providers behave alike. */
-const DEFAULT_MAX_PER_RESOURCE = 3;
 
 /** The injectable `fetch` seam — Node/Bun/Workers all expose this global shape. */
 export type FetchLike = (
@@ -133,7 +134,7 @@ function itemMeta(item: AiSearchResultItem): Record<string, unknown> {
 }
 
 /** Read one metadata key, tolerating the `x-amz-meta-` prefix and `-`/`_` spelling. */
-function metaValue(meta: Record<string, unknown>, key: string): string | undefined {
+function readMeta(meta: Record<string, unknown>, key: string): string | undefined {
 	for (const candidate of [
 		key,
 		`x-amz-meta-${key}`,
@@ -196,10 +197,10 @@ export async function search(question: string, opts: SearchOptions = {}): Promis
 		// Prefer the real source URL from custom metadata; fall back to the object's
 		// own identity so a mis-indexed object still yields a stable (if opaque) key.
 		const objectId = item.file_id ?? item.filename ?? item.id ?? item.item?.key ?? '';
-		const url = metaValue(meta, 'source-url') ?? metaValue(meta, 'url') ?? objectId;
-		if (!url) continue;
+		const sourceUrl = readMeta(meta, 'source-url') ?? readMeta(meta, 'url') ?? objectId;
+		if (!sourceUrl) continue;
 
-		const resourceId = objectId || url;
+		const resourceId = objectId || sourceUrl;
 		const seen = perResource.get(resourceId) ?? 0;
 		if (seen >= maxPerResource) continue;
 		perResource.set(resourceId, seen + 1);
@@ -207,9 +208,9 @@ export async function search(question: string, opts: SearchOptions = {}): Promis
 		passages.push({
 			text,
 			score: typeof item.score === 'number' ? item.score : 0,
-			url,
-			title: metaValue(meta, 'title') ?? null,
-			kind: metaValue(meta, 'kind') ?? 'page',
+			url: sourceUrl,
+			title: readMeta(meta, 'title') ?? null,
+			kind: readMeta(meta, 'kind') ?? 'page',
 			resourceId,
 			chunkIndex: seen
 		});

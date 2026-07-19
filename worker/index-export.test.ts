@@ -1,5 +1,5 @@
 // Cleaned-text R2 exporter test (#63). Three layers, all offline:
-//   1. buildIndexObject / metaValue — the pure selection + skip + truncation rules
+//   1. buildIndexObject / sanitizeMetaValue — the pure selection + skip + truncation rules
 //      (non-ok skipped, oversize skipped, url/title metadata capped at 500 chars).
 //   2. makeR2IndexWriter against a STUB S3 server (node http) — proves the real
 //      aws4fetch-signed PUT carries the object body + x-amz-meta-source-url/title/
@@ -16,7 +16,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
 	buildIndexObject,
-	metaValue,
+	sanitizeMetaValue,
 	makeR2IndexWriter,
 	MAX_OBJECT_BYTES,
 	META_VALUE_MAX,
@@ -78,13 +78,13 @@ describe('buildIndexObject', () => {
 	});
 });
 
-describe('metaValue', () => {
+describe('sanitizeMetaValue', () => {
 	it('strips non-ASCII and control chars to a valid header value', () => {
-		expect(metaValue('Beach — Stickers\n\t(été)')).toBe('Beach  Stickers (t)');
+		expect(sanitizeMetaValue('Beach — Stickers\n\t(été)')).toBe('Beach  Stickers (t)');
 	});
 	it('defaults null/undefined to empty', () => {
-		expect(metaValue(null)).toBe('');
-		expect(metaValue(undefined)).toBe('');
+		expect(sanitizeMetaValue(null)).toBe('');
+		expect(sanitizeMetaValue(undefined)).toBe('');
 	});
 });
 

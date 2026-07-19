@@ -68,7 +68,7 @@ export interface ExportRow {
  *  to AI Search's 500-char metadata limit. Non-ASCII (e.g. a title's em-dash) is
  *  dropped rather than encoded — attribution rides on the ASCII source URL, and a
  *  header can't carry raw Unicode. */
-export function metaValue(raw: string | null | undefined): string {
+export function sanitizeMetaValue(raw: string | null | undefined): string {
 	return (raw ?? '')
 		.replace(/[\r\n\t]+/g, ' ')
 		.replace(/[^\x20-\x7E]/g, '')
@@ -98,9 +98,9 @@ export function buildIndexObject(row: ExportRow, maxBytes = MAX_OBJECT_BYTES): I
 		bytes,
 		contentType: 'text/markdown; charset=utf-8',
 		meta: {
-			sourceUrl: metaValue(row.url),
-			title: metaValue(row.title),
-			kind: metaValue(row.kind) || 'page'
+			sourceUrl: sanitizeMetaValue(row.url),
+			title: sanitizeMetaValue(row.title),
+			kind: sanitizeMetaValue(row.kind) || 'page'
 		}
 	};
 }
