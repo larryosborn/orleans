@@ -12,6 +12,24 @@ bun run eval --markdown # markdown report   ·   --strict (nonzero exit on any m
 
 `--real` is implied when `ANTHROPIC_API_KEY` is set; `--offline` forces fakes.
 
+## Retrieval provider (`RETRIEVAL_PROVIDER`)
+
+The eval honors `RETRIEVAL_PROVIDER`, so custom-vs-AI-Search is one switch:
+
+```sh
+bun run eval                              # vectorize (default): our libSQL vector search
+RETRIEVAL_PROVIDER=ai-search bun run eval # Cloudflare AI Search retrieval
+```
+
+- **`vectorize`** (default) — embed the query + `vector_top_k` over our `chunk` index.
+- **`ai-search`** — Cloudflare AI Search's managed retrieval endpoint
+  (`rag/search.ts`), indexing the cleaned-text export (`worker:index-export`). A
+  **real** run needs `CF_ACCOUNT_ID` / `AI_SEARCH_INSTANCE` / `AI_SEARCH_TOKEN`; an
+  **offline** run uses a deterministic fake AI Search endpoint built from the same
+  fixture corpus (no network), so the switch is exercisable in CI. The comparison is
+  drop-in — both providers return the same `{ passages, sources, context }`, so
+  hit-rate / citation-validity are measured identically.
+
 ## Offline vs. real
 
 - **Offline** (default) runs against a built-in fixture corpus with a deterministic
@@ -52,14 +70,16 @@ ANTHROPIC_API_KEY=… EMBEDDING_PROVIDER=<same> DATABASE_URL="<turso-url>" \
 
 ### Relevant env
 
-| var                                              | purpose                            | default                                                |
-| ------------------------------------------------ | ---------------------------------- | ------------------------------------------------------ |
-| `EMBEDDING_PROVIDER`                             | `cloudflare` \| `openai` \| `fake` | auto (fake if no creds)                                |
-| `CLOUDFLARE_ACCOUNT_ID` / `CLOUDFLARE_API_TOKEN` | Workers AI embeddings              | —                                                      |
-| `OPENAI_API_KEY`                                 | OpenAI embeddings                  | —                                                      |
-| `ANTHROPIC_API_KEY`                              | answer LLM (enables `--real`)      | —                                                      |
-| `RAG_ANSWER_MODEL`                               | answer model override              | `claude-haiku-4-5`                                     |
-| `CLOUDFLARE_EMBED_MODEL` / `OPENAI_EMBED_MODEL`  | embed model override               | `@cf/baai/bge-base-en-v1.5` / `text-embedding-3-small` |
+| var                                                        | purpose                            | default                                                |
+| ---------------------------------------------------------- | ---------------------------------- | ------------------------------------------------------ |
+| `EMBEDDING_PROVIDER`                                       | `cloudflare` \| `openai` \| `fake` | auto (fake if no creds)                                |
+| `CLOUDFLARE_ACCOUNT_ID` / `CLOUDFLARE_API_TOKEN`           | Workers AI embeddings              | —                                                      |
+| `OPENAI_API_KEY`                                           | OpenAI embeddings                  | —                                                      |
+| `ANTHROPIC_API_KEY`                                        | answer LLM (enables `--real`)      | —                                                      |
+| `RAG_ANSWER_MODEL`                                         | answer model override              | `claude-haiku-4-5`                                     |
+| `CLOUDFLARE_EMBED_MODEL` / `OPENAI_EMBED_MODEL`            | embed model override               | `@cf/baai/bge-base-en-v1.5` / `text-embedding-3-small` |
+| `RETRIEVAL_PROVIDER`                                       | `vectorize` \| `ai-search`         | `vectorize`                                            |
+| `CF_ACCOUNT_ID` / `AI_SEARCH_INSTANCE` / `AI_SEARCH_TOKEN` | AI Search retrieval (real)         | —                                                      |
 
 ## The question set
 

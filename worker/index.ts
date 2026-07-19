@@ -11,6 +11,7 @@
 //   bun run worker/index.ts --publish             # ...writing blobs through to R2
 //   bun run worker/index.ts --mode estimate --max 80 --once
 //   bun run worker/index.ts --mode crawl          # enqueue + run once, then exit
+//   bun run worker/index.ts --mode index-export --once   # publish cleaned text to R2 index/
 //
 // Publishing is opt-in: without --publish the worker holds blobs in the LOCAL
 // backend only (r2_synced_at null); with --publish it writes through to R2 (the

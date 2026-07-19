@@ -69,8 +69,10 @@ export interface RetrieveOptions {
 	client?: Client;
 }
 
-const DEFAULT_TOP_K = 8;
-const DEFAULT_MAX_PER_RESOURCE = 3;
+/** Default passage count + per-source cap. Exported so an alternate provider
+ *  (rag/search.ts) trims to the SAME defaults and the two can't drift apart. */
+export const DEFAULT_TOP_K = 8;
+export const DEFAULT_MAX_PER_RESOURCE = 3;
 const CANDIDATE_MULTIPLIER = 5;
 
 interface CandidateRow {
@@ -168,8 +170,10 @@ export async function retrieve(
 	return { passages, sources, context };
 }
 
-/** Distinct source documents, in order of first (i.e. best-scoring) appearance. */
-function dedupeSources(passages: Passage[]): Source[] {
+/** Distinct source documents, in order of first (i.e. best-scoring) appearance.
+ *  Exported so an alternate retrieval provider (see rag/search.ts) assembles its
+ *  `sources`/`context` IDENTICALLY — the two must be drop-in interchangeable. */
+export function dedupeSources(passages: Passage[]): Source[] {
 	const seen = new Set<string>();
 	const sources: Source[] = [];
 	for (const p of passages) {
@@ -181,8 +185,9 @@ function dedupeSources(passages: Passage[]): Source[] {
 }
 
 /** Number each passage with its source's citation `[n]`, then list the sources —
- *  a compact, grounded block the answerer can quote and cite from. */
-function assembleContext(passages: Passage[], sources: Source[]): string {
+ *  a compact, grounded block the answerer can quote and cite from. Exported so an
+ *  alternate retrieval provider (rag/search.ts) produces a byte-identical context. */
+export function assembleContext(passages: Passage[], sources: Source[]): string {
 	if (passages.length === 0) return '';
 	const citation = new Map(sources.map((s, i) => [s.url, i + 1]));
 	const body = passages.map((p) => `[${citation.get(p.url)}] ${p.text}`).join('\n\n');

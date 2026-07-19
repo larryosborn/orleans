@@ -103,6 +103,27 @@ binaries can be skipped: `CRAWLER_MAX_DOC_BYTES` (env default) or per-run
 `params.maxDocBytes` (the dashboard's "Max file size, MB"). Docs over the limit are
 recorded as `probed` (size/etag, no blob); `0` = skip all documents (pages-only).
 
+## AI Search export (`index-export`)
+
+An alternate to embedding: publish the **cleaned** text layer to R2 for Cloudflare
+AI Search to index, so retrieval can be swapped to a managed provider (see
+[`rag/search.ts`](../src/lib/server/rag/search.ts) + `RETRIEVAL_PROVIDER`).
+
+```bash
+bun run worker:index-export   # resource_text (status ok) → R2 index/<resourceId>.md
+```
+
+Each `ok` resource's `resource_text` is written as one object under the `index/`
+prefix with custom metadata `x-amz-meta-source-url` / `title` / `kind` (url/title
+truncated to AI Search's 500-char limit) — so a hit maps back to a **real Orleans
+URL** for citation, unlike the raw sha256-keyed `blobs/`. Non-`ok` resources and any
+object over 4 MB are skipped (logged, never errored). Needs `R2_*` env.
+
+Custom metadata is set via **aws4fetch** (a signed PUT), not the Bun `S3Client` in
+[`storage.ts`](storage.ts): Bun's `S3Options` expose `acl`/`type`/`storageClass`/
+`contentDisposition` but have **no field for `x-amz-meta-*`** metadata, which this
+index depends on.
+
 ## Running
 
 ```bash

@@ -330,3 +330,69 @@ function firstSentence(text: string): string {
 	const s = dot > 0 ? trimmed.slice(0, dot + 1) : trimmed;
 	return s.charAt(0).toLowerCase() + s.slice(1);
 }
+
+// ---------------------------------------------------------------------------
+// Deterministic fake AI Search endpoint.
+//
+// So `RETRIEVAL_PROVIDER=ai-search bun run eval` (and the search() unit path) can
+// run fully offline: a `fetch` stand-in that answers the AI Search retrieval REST
+// call from the SAME fixture corpus, ranking docs by the same lexical coverage the
+// grounding fake uses. Each returned item mirrors the real wire shape — `content`
+// parts, a `score`, and the `x-amz-meta-source-url` / `title` / `kind` custom
+// metadata the exporter writes — so search.ts's mapping produces real source URLs
+// and the eval can compare ai-search vs vectorize head-to-head with no network.
+// ---------------------------------------------------------------------------
+
+/** A minimal `fetch`-shaped response the search() provider can read. */
+interface FakeResponse {
+	ok: boolean;
+	status: number;
+	json: () => Promise<unknown>;
+	text: () => Promise<string>;
+}
+
+/**
+ * Build a fake AI Search `fetch`. It parses the request body's `query` +
+ * `max_num_results`, scores each live fixture doc by content-word coverage, and
+ * returns the top matches as AI Search `result.data[]` items with source-url/title/
+ * kind metadata. Only `active` docs are eligible (the index never holds dead pages).
+ */
+export function makeFakeAiSearchFetch(docs: FixtureDoc[] = fixtureDocs) {
+	const live = docs.filter((d) => d.state !== 'gone' && d.state !== 'error');
+	return async (
+		_url: string,
+		init?: { method?: string; headers?: Record<string, string>; body?: string }
+	): Promise<FakeResponse> => {
+		const body = init?.body
+			? (JSON.parse(init.body) as { query?: string; max_num_results?: number })
+			: {};
+		const query = body.query ?? '';
+		const limit = Math.max(1, body.max_num_results ?? 8);
+		const qWords = contentWords(query);
+
+		const ranked = live
+			.map((d) => ({ d, score: coverage(qWords, d.text) }))
+			.filter((r) => r.score > 0)
+			.sort((a, b) => b.score - a.score)
+			.slice(0, limit);
+
+		const data = ranked.map((r) => ({
+			file_id: r.d.id,
+			filename: `${r.d.id}.md`,
+			score: r.score,
+			content: [{ type: 'text', text: r.d.text }],
+			attributes: {
+				'source-url': r.d.url,
+				title: r.d.title,
+				kind: 'page'
+			}
+		}));
+
+		return {
+			ok: true,
+			status: 200,
+			json: async () => ({ result: { data }, success: true }),
+			text: async () => JSON.stringify({ result: { data }, success: true })
+		};
+	};
+}

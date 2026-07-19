@@ -26,6 +26,7 @@ import { STALE_RUN_MS, TICK_MAX_ITEMS, TICK_TIME_BUDGET_MS } from './config';
 import { createCrawlSession, createSyncSession } from './crawl';
 import { executeExtract } from './extract';
 import { executeEmbed } from './embed';
+import { executeIndexExport } from './index-export';
 import type { WorkerIdentity } from './registry';
 import { workerLogger } from './log';
 
@@ -106,6 +107,8 @@ async function createSession(run: SyncRun, publish: boolean): Promise<RunSession
 			return oneShotSession(run, 'extracting', () => executeExtract(run));
 		case 'embed':
 			return oneShotSession(run, 'embedding', () => executeEmbed(run));
+		case 'index-export':
+			return oneShotSession(run, 'indexing', () => executeIndexExport(run));
 		default:
 			// estimate / crawl / recrawl
 			return createCrawlSession(run, { publish });
